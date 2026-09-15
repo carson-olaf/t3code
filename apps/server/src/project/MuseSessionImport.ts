@@ -110,7 +110,7 @@ export function museImportInstances(settings: ServerSettings, environment: NodeJ
   });
 }
 
-class MuseImportError extends Schema.TaggedError<MuseImportError>()("MuseImportError", {
+class MuseImportError extends Schema.TaggedErrorClass<MuseImportError>()("MuseImportError", {
   detail: Schema.String,
 }) {}
 
@@ -308,7 +308,9 @@ export const makeMuseSessionImport = Effect.fn("makeMuseSessionImport")(function
     const recent = messages.slice(-limits.messages);
     const retained = recent.includes(firstUser)
       ? recent
-      : [firstUser, ...recent.slice(-(limits.messages - 1))];
+      : limits.messages === 1
+        ? [firstUser]
+        : [firstUser, ...recent.slice(-(limits.messages - 1))];
     return {
       session: { ...read.session, modelId },
       messages: retained,

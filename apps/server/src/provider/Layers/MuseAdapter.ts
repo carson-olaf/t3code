@@ -35,7 +35,6 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
@@ -1021,18 +1020,10 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
       const modelSelection =
         input.modelSelection?.instanceId === instanceId ? input.modelSelection : undefined;
       const model = modelSelection?.model || DEFAULT_MODEL;
-      const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       const host = await createHost({
         binaryPath: settings.binaryPath,
         ...(input.cwd ? { cwd: input.cwd } : {}),
-        ...(options?.environment || mcpSession?.agentDeviceEnvironment
-          ? {
-              environment: McpProviderSession.withAgentDeviceEnvironment(
-                options?.environment ?? process.env,
-                mcpSession,
-              ),
-            }
-          : {}),
+        ...(options?.environment ? { environment: options.environment } : {}),
         runtimeMode: input.runtimeMode,
         signal,
       });
@@ -1086,8 +1077,22 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
           .catch(fail);
       });
       host.connection.onServerRequest(async (request) => {
-        await writeNativeEvent(input.threadId, request);
-        throw new Error(`Unsupported Muse server request: ${request.method}`);
+        const method =
+          request.method === "approval/request"
+            ? "approval/requested"
+            : request.method === "userInput/request"
+              ? "userInput/requested"
+              : undefined;
+        if (!method) throw new Error(`Unsupported Muse server request: ${request.method}`);
+        // Resume reissues pending prompts as requests. Queue presentation until
+        // history restores the active turn, but acknowledge without blocking resume.
+        context.notificationTail = context.notificationTail
+          .then(async () => {
+            await writeNativeEvent(input.threadId, request);
+            await handleNotification(context, { ...request, method });
+          })
+          .catch(fail);
+        return {};
       });
       host.connection.onProtocolError(fail);
       void host.connection.closed.then(() => {

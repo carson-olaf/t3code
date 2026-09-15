@@ -7,7 +7,6 @@ import {
 } from "@muse-code/sdk";
 import {
   ApprovalRequestId,
-  EnvironmentId,
   MuseSettings,
   ProviderInstanceId,
   RuntimeTaskId,
@@ -28,13 +27,15 @@ import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "../../config.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
-import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import type { MuseSdkHost, MuseSdkHostOptions } from "../museSdk.ts";
+import type { MuseSdkHost } from "../museSdk.ts";
 import { museModelCapabilities } from "../museModelCatalog.ts";
 import { makeMuseAdapter } from "./MuseAdapter.ts";
 
 function makeFakeHost() {
   let notify: NotificationHandler = () => {};
+  let onServerRequest: Parameters<
+    MuseSdkHost["connection"]["onServerRequest"]
+  >[0] = async () => ({});
   let onProtocolError: Parameters<MuseSdkHost["connection"]["onProtocolError"]>[0] = () => {};
   let resolveExit = (_exit: ProcessExit) => {};
   let resolveClosed = () => {};
@@ -82,7 +83,9 @@ function makeFakeHost() {
       onNotification: (handler) => {
         notify = handler;
       },
-      onServerRequest: () => {},
+      onServerRequest: (handler) => {
+        onServerRequest = handler;
+      },
       onProtocolError: (handler) => {
         onProtocolError = handler;
       },
@@ -151,6 +154,13 @@ function makeFakeHost() {
     host,
     calls,
     emit,
+    serverRequest: (method: string, params: Record<string, unknown>) =>
+      onServerRequest({
+        jsonrpc: "2.0",
+        id: createUuidV7Mint()(),
+        method,
+        params: { sessionId: nativeSessionId, ...params },
+      }),
     history,
     pageHistory: (pages: NonNullable<typeof historyPages>) => {
       historyPages = pages;
@@ -342,55 +352,6 @@ describe("MuseAdapter", () => {
       assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
       assert.isFalse(events.some((event) => event.type === "runtime.error"));
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
-  );
-
-  it.effect(
-    "scopes device CLI access to the granted thread without changing provider permissions",
-    () =>
-      Effect.gen(function* () {
-        const deviceThreadId = ThreadId.make("muse-device-thread");
-        const otherThreadId = ThreadId.make("muse-other-thread");
-        const baseEnvironment = { PATH: "/provider/bin", KEEP: "provider-value" };
-        const spawned: MuseSdkHostOptions[] = [];
-        const adapter = yield* makeMuseAdapter(settings, {
-          environment: baseEnvironment,
-          createHost: async (options) => {
-            spawned.push(options);
-            return makeFakeHost().host;
-          },
-        });
-        McpProviderSession.setMcpProviderSession({
-          environmentId: EnvironmentId.make("test-environment"),
-          threadId: deviceThreadId,
-          providerSessionId: "test-provider-session",
-          providerInstanceId: ProviderInstanceId.make("muse"),
-          endpoint: "http://localhost:1234/mcp",
-          authorizationHeader: "test-mcp-header-must-not-be-forwarded",
-          capabilities: new Set(["device"]),
-          agentDeviceEnvironment: {
-            PATH: "/device/shim",
-            PATH_SEPARATOR: ":",
-            AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1",
-          },
-        });
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => McpProviderSession.clearMcpProviderSession(deviceThreadId)),
-        );
-        yield* adapter.startSession({ ...startInput, threadId: deviceThreadId });
-        yield* adapter.startSession({ ...startInput, threadId: otherThreadId });
-        assert.deepEqual(spawned[0]?.environment, {
-          PATH: "/device/shim:/provider/bin",
-          KEEP: "provider-value",
-          AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1",
-        });
-        assert.deepEqual(spawned[1]?.environment, baseEnvironment);
-        assert.deepEqual(baseEnvironment, { PATH: "/provider/bin", KEEP: "provider-value" });
-        assert.equal(spawned[0]?.runtimeMode, "approval-required");
-        assert.equal(spawned[1]?.runtimeMode, "approval-required");
-        McpProviderSession.clearMcpProviderSession(deviceThreadId);
-        yield* adapter.startSession({ ...startInput, threadId: deviceThreadId });
-        assert.deepEqual(spawned[2]?.environment, baseEnvironment);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("rewinds by forking at a paged terminal boundary and releases the source host", () =>
@@ -761,7 +722,7 @@ describe("MuseAdapter", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect("reissues resumed pending requests with fresh IDs and rejects stale responses", () =>
+  it.effect("reissues resumed server requests with fresh IDs and rejects stale responses", () =>
     Effect.gen(function* () {
       const first = makeFakeHost();
       const second = makeFakeHost();
@@ -815,8 +776,8 @@ describe("MuseAdapter", () => {
 
       second.resumeTurn(turn.turnId);
       second.beforeSession(async () => {
-        second.emit("approval/requested", approval);
-        second.emit("userInput/requested", question);
+        assert.deepEqual(await second.serverRequest("approval/request", approval), {});
+        assert.deepEqual(await second.serverRequest("userInput/request", question), {});
       });
       yield* adapter.startSession({ ...startInput, resumeCursor: session.resumeCursor });
       const reopened = yield* collectUntil(adapter, "user-input.requested");

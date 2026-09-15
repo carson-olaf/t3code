@@ -207,6 +207,28 @@ it.layer(NodeServices.layer)("Muse session import", (it) => {
     }),
   );
 
+  it.effect("retains only the first user message when the message budget is one", () =>
+    Effect.gen(function* () {
+      const host = historyHost([
+        {
+          events: [
+            event("u", "userMessage", "first"),
+            event("a", "agentMessage", "answer"),
+            modelEvent("session/tokenUsage", "muse-spark-1.3-contributor"),
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const result = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reader = yield* makeMuseSessionImport(async () => host);
+          return yield* reader.read(instance, SESSION_ID, { ...limits, messages: 1 });
+        }),
+      );
+      expect(result.messages.map((message) => message.text)).toEqual(["first"]);
+    }),
+  );
+
   it.effect("preserves the latest explicit model selection over late previous-turn usage", () =>
     Effect.gen(function* () {
       const host = historyHost([

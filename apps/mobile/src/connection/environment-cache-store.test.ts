@@ -32,7 +32,6 @@ const THREAD_SNAPSHOT: OrchestrationThreadDetailSnapshot = {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
-    pullRequests: [],
     deletedAt: null,
     messages: [],
     proposedPlans: [],
