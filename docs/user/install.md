@@ -74,6 +74,7 @@ computer.
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                          |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                             |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                       |
+| Prime Agent | See [Prime Agent setup](./providers-prime-agent.md). Requires Full Access.                     |
 | Muse Code   | Install [Muse Code](https://developer.meta.com/ai/products/muse-code/), then run `muse login`. |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                              |
 
@@ -95,7 +96,7 @@ base URL. Mark secret values as sensitive; after saving, T3 Code does not displa
 their original values.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
-[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md), [Muse Code](./providers-muse.md), and
+[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md), [Muse Code](./providers-muse.md), [Prime Agent](./providers-prime-agent.md), and
 [Antigravity](./providers-antigravity.md).
 
 ## Next steps

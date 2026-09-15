@@ -29,3 +29,5 @@ Antigravity can still send native approval requests in **Full access**. It only 
 approvals for actions that support them.
 
 See the [provider guides](./install.md#providers) for setup and provider-specific limits.
+
+Prime Agent supports **Full Access** only. Its ACP interface does not enforce approval or sandbox modes; T3 rejects other modes. See [Prime Agent](./providers-prime-agent.md).

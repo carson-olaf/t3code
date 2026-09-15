@@ -5,6 +5,7 @@ import {
   CursorIcon,
   GrokIcon,
   MuseIcon,
+  PrimeAgentIcon,
   Icon,
   OpenAI,
   OpenCodeIcon,
@@ -17,6 +18,7 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("cursor")]: CursorIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
   [ProviderDriverKind.make("muse")]: MuseIcon,
+  [ProviderDriverKind.make("primeAgent")]: PrimeAgentIcon,
   [ProviderDriverKind.make("antigravity")]: AntigravityIcon,
 };
 

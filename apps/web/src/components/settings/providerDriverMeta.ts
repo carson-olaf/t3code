@@ -5,6 +5,7 @@ import {
   CursorSettings,
   GrokSettings,
   MuseSettings,
+  PrimeAgentSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
@@ -15,6 +16,7 @@ import {
   CursorIcon,
   GrokIcon,
   MuseIcon,
+  PrimeAgentIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
@@ -46,6 +48,13 @@ export interface ProviderClientDefinition {
 }
 
 const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
+  {
+    value: ProviderDriverKind.make("primeAgent"),
+    label: "Prime Agent",
+    icon: PrimeAgentIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: PrimeAgentSettings,
+  },
   {
     value: ProviderDriverKind.make("codex"),
     label: "Codex",
