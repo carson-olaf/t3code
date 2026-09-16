@@ -1659,6 +1659,269 @@ describe("MuseAdapter", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect("answers live approvals and questions while history recovery polls", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      fake.unavailableHistory();
+      // loadHistory consumes the first pages; the trailing pair keeps every
+      // later poll on an empty terminal page so the session stays up.
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                item: {
+                  itemId: "saved-item",
+                  turnId: "saved-turn",
+                  kind: "agentMessage",
+                  revision: 1,
+                  status: "completed",
+                  text: "Saved response",
+                },
+                viewCursor: "resume-head",
+              },
+            },
+          ],
+          nextCursor: "history-next",
+        },
+        { events: [], nextCursor: "resume-head" },
+        { events: [], nextCursor: null },
+      ]);
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+        historyPollIntervalMs: 1,
+      });
+      yield* adapter.startSession({
+        ...startInput,
+        resumeCursor: { sessionId: "saved-muse-session" },
+      });
+      const turn = yield* adapter.sendTurn({ threadId, input: "Run tool" });
+      const approval = {
+        approvalId: "pending-approval",
+        turnId: turn.turnId,
+        toolName: "shell",
+        subject: { kind: "shell", command: "ls" },
+        currentRequirementId: { approvalId: "pending-approval", sourceIndex: 0 },
+        availableChoices: [
+          { choiceId: "once", label: "Allow once", decision: "approved", scope: "once" },
+        ],
+      };
+      const question = {
+        userInputId: "pending-question",
+        turnId: turn.turnId,
+        questions: [
+          {
+            id: "q",
+            header: "Continue",
+            question: "Continue?",
+            options: [{ label: "Yes" }],
+            selection: { mode: "single" },
+          },
+        ],
+      };
+      yield* Effect.promise(() => fake.serverRequest("approval/request", approval));
+      const opened = yield* collectUntil(adapter, "request.opened");
+      yield* adapter.respondToRequest(threadId, requestIdFrom(opened, "request.opened"), "accept");
+      yield* Effect.promise(() => fake.serverRequest("userInput/request", question));
+      const asked = yield* collectUntil(adapter, "user-input.requested");
+      yield* adapter.respondToUserInput(threadId, requestIdFrom(asked, "user-input.requested"), {
+        q: "Yes",
+      });
+      assert.equal(
+        fake.calls.find((call) => call.method === "approval/decide")?.params.approvalId,
+        "pending-approval",
+      );
+      assert.equal(
+        fake.calls.find((call) => call.method === "userInput/answer")?.params.userInputId,
+        "pending-question",
+      );
+      // The approval already resolved live before the question was asked.
+      assert.isDefined(asked.find((event) => event.type === "request.resolved"));
+      const settled = yield* collectUntil(adapter, "user-input.resolved");
+      assert.isDefined(settled.find((event) => event.type === "user-input.resolved"));
+      yield* adapter.stopSession(threadId);
+      const exited = yield* collectUntil(adapter, "session.exited");
+      assert.equal(
+        exited.find((event) => event.type === "session.exited")?.payload.exitKind,
+        "graceful",
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("interrupts and continues fallback turns through durable progress pages", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      fake.unavailableHistory();
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                item: {
+                  itemId: "saved-item",
+                  turnId: "saved-turn",
+                  kind: "agentMessage",
+                  revision: 1,
+                  status: "completed",
+                  text: "Saved response",
+                },
+                viewCursor: "resume-head",
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+        historyPollIntervalMs: 1,
+      });
+      yield* adapter.startSession({
+        ...startInput,
+        resumeCursor: { sessionId: "saved-muse-session" },
+      });
+      const first = yield* adapter.sendTurn({ threadId, input: "First" });
+      fake.deferTurnInterrupted();
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "turn/completed",
+              params: {
+                sessionId: "saved-muse-session",
+                turnId: first.turnId,
+                terminal: "cancelled",
+                viewCursor: "interrupted-head",
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      yield* adapter.interruptTurn(threadId, first.turnId);
+      const interrupted = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(
+        interrupted.filter((event) => event.type === "turn.completed").at(-1)?.payload.state,
+        "interrupted",
+      );
+      // The paged terminal is adapter-side; release the fake native turn too.
+      fake.resumeTurn(undefined);
+      const second = yield* adapter.sendTurn({ threadId, input: "Second" });
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                sessionId: "saved-muse-session",
+                viewCursor: "reply-head",
+                item: {
+                  itemId: "second-item",
+                  turnId: second.turnId,
+                  kind: "agentMessage",
+                  revision: 1,
+                  status: "completed",
+                  text: "Second reply",
+                },
+              },
+            },
+            {
+              method: "turn/completed",
+              params: {
+                sessionId: "saved-muse-session",
+                turnId: second.turnId,
+                terminal: "completed",
+                viewCursor: "completed-head",
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const finished = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(
+        finished.filter((event) => event.type === "turn.completed").at(-1)?.payload.state,
+        "completed",
+      );
+      assert.equal(
+        finished.filter((event) => event.type === "content.delta").at(-1)?.payload.delta,
+        "Second reply",
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("fails the session once when fallback progress pages stop advancing", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      fake.unavailableHistory();
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                item: {
+                  itemId: "saved-item",
+                  turnId: "saved-turn",
+                  kind: "agentMessage",
+                  revision: 1,
+                  status: "completed",
+                  text: "Saved response",
+                },
+                viewCursor: "resume-head",
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+        historyPollIntervalMs: 1,
+      });
+      yield* adapter.startSession({
+        ...startInput,
+        resumeCursor: { sessionId: "saved-muse-session" },
+      });
+      yield* adapter.sendTurn({ threadId, input: "Run" });
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                sessionId: "saved-muse-session",
+                item: {
+                  itemId: "stalled-item",
+                  turnId: "stalled-turn",
+                  kind: "agentMessage",
+                  revision: 1,
+                  status: "completed",
+                  text: "Stalled",
+                },
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const events = yield* collectUntil(adapter, "session.exited");
+      assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      assert.equal(
+        events.find((event) => event.type === "turn.completed")?.payload.state,
+        "failed",
+      );
+      assert.equal(
+        events.find((event) => event.type === "session.exited")?.payload.recoverable,
+        true,
+      );
+      assert.equal(fake.closeCount, 1);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect(
     "host failure and unavailable event feeds close once with one failed turn and durable cursor",
     () =>
