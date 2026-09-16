@@ -418,11 +418,11 @@ export const ChatHeader = memo(function ChatHeader({
                 render={
                   <Button
                     size="pill"
-                    variant="ghost-muted"
+                    variant="ghost-outline"
                     data-thread-parked={parkedState.kind}
                     disabled={parkedState.releasing}
                     onClick={parkedState.onRelease}
-                    className="ml-2 border-border/80 [:hover,[data-pressed]]:border-foreground/40"
+                    className="ml-2"
                   />
                 }
               >
