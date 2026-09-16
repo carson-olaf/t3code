@@ -65,6 +65,7 @@ function makeFakeHost() {
   let onInterrupt = () => {};
   let sessionResultId: string | undefined;
   let compactStatus = "accepted";
+  let historyUnavailable = false;
   const host: MuseSdkHost = {
     initializeResult: {
       experimentalApi: false,
@@ -120,7 +121,10 @@ function makeFakeHost() {
               modelId: params.modelId ?? "muse-spark-1.3-contributor",
               activeTurnId: activeTurnId ?? null,
             },
-            history: { items: historyPages ? null : history },
+            history: {
+              items: historyUnavailable || historyPages ? null : history,
+              ...(historyUnavailable ? { noneReason: "projectionUnavailable" } : {}),
+            },
           };
         }
         if (method === "turn/start") {
@@ -162,6 +166,9 @@ function makeFakeHost() {
         params: { sessionId: nativeSessionId, ...params },
       }),
     history,
+    unavailableHistory: () => {
+      historyUnavailable = true;
+    },
     pageHistory: (pages: NonNullable<typeof historyPages>) => {
       historyPages = pages;
     },
@@ -1570,69 +1577,109 @@ describe("MuseAdapter", () => {
       }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect("host failure and view gaps close once with one failed turn and durable cursor", () =>
+  it.effect("rejects resume when Muse cannot project saved history", () =>
     Effect.gen(function* () {
-      for (const failure of ["host", "gap"] as const) {
-        const fake = makeFakeHost();
-        const resumed = makeFakeHost();
-        let hostCount = 0;
-        const adapter = yield* makeMuseAdapter(settings, {
-          createHost: async () => (hostCount++ === 0 ? fake.host : resumed.host),
-        });
-        const session = yield* adapter.startSession(startInput);
-        yield* adapter.sendTurn({ threadId, input: "Run" });
-        if (failure === "host") fake.crash();
-        else fake.emit("view/gap", { after: "opaque1", next: "opaque2" });
-        const events = yield* collectUntil(adapter, "session.exited");
-        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
-        assert.equal(
-          events.find((event) => event.type === "turn.completed")?.payload.state,
-          "failed",
-        );
-        assert.deepEqual(
-          events.find((event) => event.type === "session.started")?.payload.resume,
-          session.resumeCursor,
-        );
-        assert.equal(
-          events.find((event) => event.type === "session.exited")?.payload.recoverable,
-          true,
-        );
-        yield* adapter.stopAll();
-        assert.equal(fake.closeCount, 1);
-        if (failure === "gap") {
-          const error = events.find((event) => event.type === "runtime.error");
-          assert.include(
-            error?.payload.message,
-            "missing updates will not be restored in this chat",
-          );
-          assert.include(error?.payload.message, "Muse Code retains the saved conversation");
-          resumed.history.push({
-            itemId: "missing-from-chat",
-            turnId: "saved-turn",
-            kind: "agentMessage",
-            status: "completed",
-            revision: 1,
-            text: "Saved in Muse while delivery was interrupted",
-          });
-          const recovered = yield* adapter.startSession({
-            ...startInput,
-            resumeCursor: session.resumeCursor,
-          });
-          assert.deepEqual(recovered.resumeCursor, session.resumeCursor);
-          const replay = yield* collectUntil(adapter, "session.state.changed");
-          assert.equal(replay.filter((event) => event.type === "content.delta").length, 0);
-          assert.equal(replay.filter((event) => event.type === "turn.completed").length, 0);
-          assert.equal(
-            resumed.calls.find((call) => call.method === "session/resume")?.params.sessionId,
-            (session.resumeCursor as { sessionId: string }).sessionId,
-          );
-          const saved = yield* adapter.readThread(threadId);
-          assert.equal(saved.turns[0]?.id, "saved-turn");
-          yield* adapter.stopAll();
-          assert.equal(resumed.closeCount, 1);
-        }
-      }
+      const fake = makeFakeHost();
+      fake.unavailableHistory();
+      const adapter = yield* makeMuseAdapter(settings, { createHost: async () => fake.host });
+      const error = yield* adapter
+        .startSession({ ...startInput, resumeCursor: { sessionId: "saved-muse-session" } })
+        .pipe(Effect.flip);
+      assert.include(error.message, "history projection is unavailable");
+      assert.equal(fake.closeCount, 1);
+      const events = yield* collectUntil(adapter, "session.exited");
+      assert.equal(
+        events.some((event) => event.type === "session.started"),
+        false,
+      );
+      assert.equal(
+        events.find((event) => event.type === "session.exited")?.payload.recoverable,
+        true,
+      );
     }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "host failure and unavailable event feeds close once with one failed turn and durable cursor",
+    () =>
+      Effect.gen(function* () {
+        for (const failure of ["host", "gap", "unavailable"] as const) {
+          const fake = makeFakeHost();
+          const resumed = makeFakeHost();
+          let hostCount = 0;
+          const adapter = yield* makeMuseAdapter(settings, {
+            createHost: async () => (hostCount++ === 0 ? fake.host : resumed.host),
+          });
+          const session = yield* adapter.startSession(startInput);
+          yield* adapter.sendTurn({ threadId, input: "Run" });
+          if (failure === "host") fake.crash();
+          else if (failure === "gap") fake.emit("view/gap", { after: "opaque1", next: "opaque2" });
+          else {
+            fake.emit("session/viewHealthChanged", { health: "available" });
+            fake.emit("session/viewHealthChanged", {
+              health: "unavailable",
+              noneReason: "projectionUnavailable",
+            });
+            fake.emit("session/viewHealthChanged", {
+              health: "unavailable",
+              noneReason: "projectionUnavailable",
+            });
+          }
+          const events = yield* collectUntil(adapter, "session.exited");
+          assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+          assert.equal(
+            events.find((event) => event.type === "turn.completed")?.payload.state,
+            "failed",
+          );
+          assert.deepEqual(
+            events.find((event) => event.type === "session.started")?.payload.resume,
+            session.resumeCursor,
+          );
+          assert.equal(
+            events.find((event) => event.type === "session.exited")?.payload.recoverable,
+            true,
+          );
+          yield* adapter.stopAll();
+          assert.equal(fake.closeCount, 1);
+          if (failure === "unavailable") {
+            const error = events.find((event) => event.type === "runtime.error");
+            assert.include(error?.payload.message, "progress feed is unavailable");
+            assert.include(error?.payload.message, "Resume the session");
+          }
+          if (failure === "gap") {
+            const error = events.find((event) => event.type === "runtime.error");
+            assert.include(
+              error?.payload.message,
+              "missing updates will not be restored in this chat",
+            );
+            assert.include(error?.payload.message, "Muse Code retains the saved conversation");
+            resumed.history.push({
+              itemId: "missing-from-chat",
+              turnId: "saved-turn",
+              kind: "agentMessage",
+              status: "completed",
+              revision: 1,
+              text: "Saved in Muse while delivery was interrupted",
+            });
+            const recovered = yield* adapter.startSession({
+              ...startInput,
+              resumeCursor: session.resumeCursor,
+            });
+            assert.deepEqual(recovered.resumeCursor, session.resumeCursor);
+            const replay = yield* collectUntil(adapter, "session.state.changed");
+            assert.equal(replay.filter((event) => event.type === "content.delta").length, 0);
+            assert.equal(replay.filter((event) => event.type === "turn.completed").length, 0);
+            assert.equal(
+              resumed.calls.find((call) => call.method === "session/resume")?.params.sessionId,
+              (session.resumeCursor as { sessionId: string }).sessionId,
+            );
+            const saved = yield* adapter.readThread(threadId);
+            assert.equal(saved.turns[0]?.id, "saved-turn");
+            yield* adapter.stopAll();
+            assert.equal(resumed.closeCount, 1);
+          }
+        }
+      }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("forwards max effort unchanged when switching to Muse Spark 1.3", () =>

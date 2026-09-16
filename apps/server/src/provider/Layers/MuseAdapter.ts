@@ -952,6 +952,14 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         });
         break;
       }
+      case "session/viewHealthChanged":
+        // Muse can keep executing after its projected event feed fails. Without
+        // closing the broken connection, T3 never receives the final turn event.
+        if (params.health === "unavailable")
+          throw new Error(
+            "Muse's progress feed is unavailable. This connection was closed because progress and completion can no longer be tracked. Resume the session to reconnect; Muse retains the saved conversation, but missing updates will not be restored in this chat.",
+          );
+        break;
       case "view/gap":
         throw new Error(
           "Muse's event stream lost updates. Resume to continue working; missing updates will not be restored in this chat. Muse Code retains the saved conversation.",
@@ -1116,6 +1124,10 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
                 },
           ),
         );
+        if (result.history?.noneReason === "projectionUnavailable")
+          throw new Error(
+            "Muse could not read this session's saved progress. Its history projection is unavailable. The saved conversation remains in Muse; reconnect after the CLI can read it again.",
+          );
         if (result.session.sessionId !== context.nativeSessionId)
           throw new Error("Muse returned an unexpected session identity.");
         context.nativeSessionId = result.session.sessionId;

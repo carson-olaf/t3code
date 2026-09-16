@@ -58,3 +58,9 @@ sandbox controls required by the other T3 permission modes.
 T3 Code rejects a Prime Agent session started with another permission mode instead of presenting a
 mode it cannot enforce. Use a separate operating-system account or another isolation boundary when
 the workspace must not have full host access.
+
+## Progress
+
+Python tool activity includes the executing cell. Native subagent updates show
+queued, running, completed, failed, or stopped work. Background children can
+continue after the main reply; their own reported status determines completion.

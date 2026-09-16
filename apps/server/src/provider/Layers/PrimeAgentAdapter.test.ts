@@ -7,6 +7,8 @@ import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  EventId,
+  TurnId,
   PrimeAgentSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -21,7 +23,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "../../config.ts";
-import { makePrimeAgentAdapter } from "./PrimeAgentAdapter.ts";
+import {
+  makePrimeAgentAdapter,
+  makePrimeSubagentTracker,
+  withPrimeAgentToolDetails,
+} from "./PrimeAgentAdapter.ts";
+import { makeAcpToolCallEvent } from "../acp/AcpCoreRuntimeEvents.ts";
 
 const decodePrimeAgentSettings = Schema.decodeSync(PrimeAgentSettings);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -82,6 +89,92 @@ const primeAgentAdapterTestLayer = it.layer(
     prefix: "t3code-prime-agent-adapter-test-",
   }).pipe(Layer.provideMerge(NodeServices.layer)),
 );
+
+it("exposes executing Python cell source while preserving output and lifecycle", () => {
+  const code = 'from pathlib import Path\nprint(Path("README.md").read_text())';
+  for (const status of ["inProgress", "completed"] as const) {
+    const event = makeAcpToolCallEvent({
+      stamp: { eventId: EventId.make("python-event"), createdAt: "2026-09-15T00:00:00.000Z" },
+      provider: ProviderDriverKind.make("primeAgent"),
+      threadId: ThreadId.make("python-thread"),
+      turnId: TurnId.make("python-turn"),
+      toolCall: withPrimeAgentToolDetails({
+        toolCallId: "python-cell",
+        kind: "execute",
+        title: "Python cell",
+        status,
+        detail: "Python cell",
+        data: { rawInput: { code }, rawOutput: "README contents" },
+      }),
+      rawPayload: {},
+    });
+    assert.equal(event.type, status === "completed" ? "item.completed" : "item.updated");
+    if (event.type === "item.completed" || event.type === "item.updated") {
+      assert.equal(event.payload.detail, code);
+      const data = Schema.decodeUnknownSync(
+        Schema.Struct({ command: Schema.String, rawOutput: Schema.String }),
+      )(event.payload.data);
+      assert.equal(data.command, code);
+      assert.equal(data.rawOutput, "README contents");
+      assert.equal(event.payload.title, "Python cell");
+    }
+  }
+  const shell = { toolCallId: "shell", kind: "execute", data: { rawInput: { command: "pwd" } } };
+  assert.strictEqual(withPrimeAgentToolDetails(shell), shell);
+});
+
+it("tracks native subagents once and retains their owning turn after foreground completion", () => {
+  const track = makePrimeSubagentTracker();
+  const update = (status: string, error?: string) => ({
+    sessionUpdate: "session_info_update",
+    _meta: {
+      "ai.primeintellect.prime-agent": {
+        subagents: [{ id: "child-1", sessionName: "Review", status, ...(error ? { error } : {}) }],
+      },
+    },
+  });
+  const turnId = TurnId.make("parent-turn");
+  const queued = track(update("queued"), turnId);
+  assert.deepEqual(
+    queued.map((event) => event.type),
+    ["task.started", "task.progress"],
+  );
+  assert.equal(
+    queued[1] && "status" in queued[1].payload ? queued[1].payload.status : undefined,
+    "pending",
+  );
+  assert.deepEqual(track(update("queued"), turnId), []);
+  const running = track(update("running"), turnId);
+  assert.lengthOf(running, 1);
+  assert.equal(
+    running[0] && "status" in running[0].payload ? running[0].payload.status : undefined,
+    "running",
+  );
+  // A foreground turn ending emits no child event. A later native child update
+  // belongs to the original turn even while another foreground turn is active.
+  const finished = track(update("done"), TurnId.make("next-turn"));
+  assert.equal(finished[0]?.type, "task.completed");
+  assert.equal(finished[0]?.turnId, turnId);
+  assert.equal(
+    finished[0] && "status" in finished[0].payload ? finished[0].payload.status : undefined,
+    "completed",
+  );
+  assert.deepEqual(track(update("done")), []);
+  assert.deepEqual(track(update("running")), []);
+  for (const [native, expected] of [
+    ["error", "failed"],
+    ["cancelled", "stopped"],
+  ]) {
+    const events = makePrimeSubagentTracker()(update(native!, "Native failure"));
+    assert.equal(
+      events[1] && "status" in events[1].payload ? events[1].payload.status : undefined,
+      expected,
+    );
+  }
+  assert.deepEqual(track(update("future-status")), []);
+  assert.deepEqual(track({ sessionUpdate: "session_info_update", _meta: {} }), []);
+  assert.equal(makePrimeSubagentTracker()(update("running"))[0]?.type, "task.started");
+});
 
 primeAgentAdapterTestLayer("PrimeAgentAdapterLive", (it) => {
   it.effect("launches deterministic ACP sessions and maps prompt events and images", () =>

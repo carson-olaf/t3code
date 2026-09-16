@@ -65,8 +65,11 @@ the selected point. Stop an active turn before reverting. Muse may reject a
 point whose failed or interrupted turn was not committed, such as a failed
 sign-in attempt.
 
-If Muse reports lost event updates, resume to continue working. Muse retains its
-saved conversation, but missing updates are not restored in the T3 Code chat.
+If Muse reports lost event updates or an unavailable progress feed, T3 closes
+the connection and marks the turn failed instead of leaving it working indefinitely.
+Resume to reconnect. Muse retains its saved conversation, but missing updates
+are not restored in the T3 Code chat. If Muse cannot read its saved history,
+T3 reports that error rather than starting a session with incomplete history.
 
 ## Current limitations
 

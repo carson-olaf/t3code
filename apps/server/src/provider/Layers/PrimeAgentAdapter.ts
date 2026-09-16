@@ -13,6 +13,10 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSession,
   RuntimeRequestId,
+  RuntimeTaskId,
+  type TaskStartedPayload,
+  type TaskProgressPayload,
+  type TaskCompletedPayload,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -55,7 +59,7 @@ import {
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
-import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import { parsePermissionRequest, type AcpToolCallState } from "../acp/AcpRuntimeModel.ts";
 import { makePrimeAgentAcpRuntime, resolvePrimeAgentModel } from "../acp/PrimeAgentAcpSupport.ts";
 import type { PrimeAgentAdapterShape } from "../Services/PrimeAgentAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -102,6 +106,102 @@ interface PrimeAgentSessionContext {
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
   return Exit.isSuccess(result) ? result.value : undefined;
+}
+
+const isPythonCellInput = Schema.is(Schema.Struct({ code: Schema.String }));
+
+export function withPrimeAgentToolDetails(toolCall: AcpToolCallState): AcpToolCallState {
+  const input = toolCall.data.rawInput;
+  if (toolCall.kind !== "execute" || !isPythonCellInput(input) || !input.code.trim()) {
+    return toolCall;
+  }
+  // Prime exposes its Python REPL source as `code`, which generic ACP command
+  // extraction does not recognize. Keep the native title and reveal the cell.
+  const code = input.code.trim();
+  return {
+    ...toolCall,
+    command: code,
+    detail: code,
+    data: { ...toolCall.data, command: code },
+  };
+}
+
+const isPrimeSubagentUpdate = Schema.is(
+  Schema.Struct({
+    sessionUpdate: Schema.Literal("session_info_update"),
+    _meta: Schema.Struct({
+      "ai.primeintellect.prime-agent": Schema.Struct({
+        subagents: Schema.Array(
+          Schema.Struct({
+            id: Schema.NonEmptyString,
+            sessionName: Schema.optional(Schema.String),
+            status: Schema.String,
+            error: Schema.optional(Schema.String),
+          }),
+        ),
+      }),
+    }),
+  }),
+);
+
+type PrimeSubagentEvent = (
+  | { type: "task.started"; payload: TaskStartedPayload }
+  | { type: "task.progress"; payload: TaskProgressPayload }
+  | { type: "task.completed"; payload: TaskCompletedPayload }
+) & { turnId?: TurnId };
+
+export function makePrimeSubagentTracker() {
+  const children = new Map<string, { fingerprint: string; terminal: boolean; turnId?: TurnId }>();
+  return (update: unknown, turnId?: TurnId): PrimeSubagentEvent[] => {
+    if (!isPrimeSubagentUpdate(update)) return [];
+    const events: PrimeSubagentEvent[] = [];
+    for (const child of update._meta["ai.primeintellect.prime-agent"].subagents) {
+      if (!["queued", "running", "done", "error", "cancelled"].includes(child.status)) continue;
+      const previous = children.get(child.id);
+      const fingerprint = JSON.stringify([child.status, child.sessionName, child.error]);
+      if (previous?.terminal || previous?.fingerprint === fingerprint) continue;
+      const ownerTurnId = previous?.turnId ?? turnId;
+      const identity = ownerTurnId ? { turnId: ownerTurnId } : {};
+      const title = child.sessionName?.trim() || "Prime subagent";
+      const linkage = { taskId: RuntimeTaskId.make(child.id), taskType: "subagent", title };
+      if (!previous)
+        events.push({
+          type: "task.started",
+          ...identity,
+          payload: { ...linkage, description: title },
+        });
+      const terminal =
+        child.status === "done" || child.status === "error" || child.status === "cancelled";
+      if (terminal) {
+        events.push({
+          type: "task.completed",
+          ...identity,
+          payload: {
+            ...linkage,
+            status:
+              child.status === "done"
+                ? "completed"
+                : child.status === "cancelled"
+                  ? "stopped"
+                  : "failed",
+            ...(child.error?.trim() ? { summary: child.error.trim() } : {}),
+          },
+        });
+      } else {
+        events.push({
+          type: "task.progress",
+          ...identity,
+          payload: {
+            ...linkage,
+            description: title,
+            status: child.status === "queued" ? "pending" : "running",
+          },
+        });
+      }
+      children.set(child.id, { fingerprint, terminal, ...identity });
+    }
+    return events;
+  };
 }
 
 export function parsePrimeAgentResumeCursor(raw: unknown): { readonly resume: true } | undefined {
@@ -476,6 +576,29 @@ export function makePrimeAgentAdapter(
             stopped: false,
           };
 
+          const trackSubagents = makePrimeSubagentTracker();
+          yield* acp.handleSessionUpdate((notification) =>
+            mapAcpCallbackFailure(
+              Effect.gen(function* () {
+                if (context.stopped || notification.sessionId !== context.acpSessionId) return;
+                // Child work may outlive a foreground prompt. Native child status,
+                // never prompt completion, owns this task lifecycle.
+                for (const event of trackSubagents(notification.update, context.activeTurnId)) {
+                  yield* offerRuntimeEvent({
+                    ...event,
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: context.threadId,
+                  });
+                }
+              }).pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("Failed to publish Prime Agent subagent progress.", { cause }),
+                ),
+              ),
+            ),
+          );
+
           const notificationFiber = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
@@ -519,7 +642,7 @@ export function makePrimeAgentAdapter(
                         provider: PROVIDER,
                         threadId: context.threadId,
                         turnId: context.activeTurnId,
-                        toolCall: event.toolCall,
+                        toolCall: withPrimeAgentToolDetails(event.toolCall),
                         rawPayload: event.rawPayload,
                       }),
                     );
