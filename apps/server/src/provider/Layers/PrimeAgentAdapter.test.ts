@@ -321,16 +321,66 @@ primeAgentAdapterTestLayer("PrimeAgentAdapterLive", (it) => {
         assert.lengthOf(snapshot.turns, 1);
         assert.lengthOf(yield* adapter.listSessions(), 1);
         assert.isTrue(yield* adapter.hasSession(threadId));
-        assert.isFalse(adapter.capabilities.supportsConversationRollback);
-        const rollback = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.result);
-        assert.equal(rollback._tag, "Failure");
-        if (rollback._tag === "Failure") {
-          assert.include(rollback.failure.message, "does not support conversation rollback");
+        assert.isFalse("supportsConversationRollback" in adapter.capabilities);
+        assert.deepStrictEqual(adapter.compaction, { type: "slash-command", command: "/compact" });
+        const rolledBack = yield* adapter.rollbackThread(threadId, 1);
+        assert.lengthOf(rolledBack.turns, 0);
+        assert.lengthOf((yield* adapter.readThread(threadId)).turns, 0);
+        // Rewinding past the transcript start is a no-op, not an error.
+        assert.lengthOf((yield* adapter.rollbackThread(threadId, 5)).turns, 0);
+        const invalidRollback = yield* adapter.rollbackThread(threadId, 0).pipe(Effect.result);
+        assert.equal(invalidRollback._tag, "Failure");
+        if (invalidRollback._tag === "Failure") {
+          assert.include(invalidRollback.failure.message, "numTurns must be an integer >= 1");
         }
-        assert.deepStrictEqual(yield* adapter.readThread(threadId), snapshot);
         yield* adapter.stopSession(threadId);
         assert.isFalse(yield* adapter.hasSession(threadId));
         yield* Fiber.interrupt(eventFiber);
+      }),
+    ),
+  );
+
+  it.effect("reports the underlying prompt failure detail on turn completion", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "prime-agent-adapter-failure-")),
+        );
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper({
+            argvLogPath: NodePath.join(tempDir, "argv.txt"),
+            extraEnv: { T3_ACP_FAIL_PROMPT: "1" },
+          }),
+        );
+        const adapter = yield* makePrimeAgentAdapter(
+          decodePrimeAgentSettings({ enabled: true, binaryPath: wrapperPath }),
+        );
+        const threadId = ThreadId.make("prime-agent-failure");
+        const completed = yield* Deferred.make<ProviderRuntimeEvent>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) => {
+          if (event.threadId !== threadId || event.type !== "turn.completed") return Effect.void;
+          return Deferred.succeed(completed, event).pipe(Effect.ignore);
+        }).pipe(Effect.forkChild);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("primeAgent"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const result = yield* adapter
+          .sendTurn({ threadId, input: "fail please" })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        const event = yield* Deferred.await(completed);
+        assert.equal(event.type, "turn.completed");
+        if (event.type === "turn.completed") {
+          assert.equal(event.payload.state, "failed");
+          assert.include(event.payload.errorMessage ?? "", "Mock prompt failure");
+        }
+        const session = (yield* adapter.listSessions())[0];
+        assert.equal(session?.status, "error");
+        assert.include(session?.lastError ?? "", "Mock prompt failure");
+        yield* adapter.stopSession(threadId);
       }),
     ),
   );

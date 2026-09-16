@@ -30,6 +30,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -243,6 +244,20 @@ function settlePendingApprovalsAsCancelled(
     (pending) => Deferred.succeed(pending.decision, "cancel").pipe(Effect.ignore),
     { discard: true },
   );
+}
+
+// The adapter settles its own terminal turn event, so keep the underlying
+// failure detail instead of reporting a generic message. Orchestration only
+// observes adapter events and never re-emits this terminal state.
+function describePrimeAgentTurnFailure(cause: Cause.Cause<unknown>): string {
+  const failure = Cause.findErrorOption(cause);
+  if (Option.isSome(failure) && Predicate.isObject(failure.value)) {
+    const message = failure.value.message;
+    if (typeof message === "string" && message.trim()) {
+      return `Prime Agent ACP turn failed: ${message.trim()}`;
+    }
+  }
+  return "Prime Agent ACP turn failed.";
 }
 
 export function makePrimeAgentAdapter(
@@ -890,7 +905,7 @@ export function makePrimeAgentAdapter(
                 prepared.turnId,
                 Cause.hasInterruptsOnly(exit.cause)
                   ? { _tag: "interrupted" }
-                  : { _tag: "failure", message: "Prime Agent ACP turn failed." },
+                  : { _tag: "failure", message: describePrimeAgentTurnFailure(exit.cause) },
               )
             : Effect.void,
       );
@@ -954,14 +969,21 @@ export function makePrimeAgentAdapter(
         return { threadId, turns: context.turns };
       });
 
-    const rollbackThread: PrimeAgentAdapterShape["rollbackThread"] = (threadId) =>
+    const rollbackThread: PrimeAgentAdapterShape["rollbackThread"] = (threadId, numTurns) =>
       Effect.gen(function* () {
-        yield* requireSession(threadId);
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "rollbackThread",
-          issue: "Prime Agent does not support conversation rollback.",
-        });
+        const context = yield* requireSession(threadId);
+        if (!Number.isInteger(numTurns) || numTurns < 1) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: "numTurns must be an integer >= 1.",
+          });
+        }
+        // Matches Cursor/Grok: rewind the adapter-visible transcript. The native
+        // Prime session keeps its own history; only a new thread restarts natively.
+        const nextLength = Math.max(0, context.turns.length - numTurns);
+        context.turns.splice(nextLength);
+        return { threadId, turns: context.turns };
       });
 
     const stopSession: PrimeAgentAdapterShape["stopSession"] = (threadId) =>
@@ -995,7 +1017,8 @@ export function makePrimeAgentAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "unsupported", supportsConversationRollback: false },
+      capabilities: { sessionModelSwitch: "unsupported" },
+      compaction: { type: "slash-command", command: "/compact" },
       startSession,
       sendTurn,
       interruptTurn,
