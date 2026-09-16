@@ -133,7 +133,7 @@ import type {
   ComposerContextRecord,
   KnownComposerContextRecord,
 } from "@t3tools/contracts";
-import { Button } from "../ui/button";
+import { Button, InlineButton } from "../ui/button";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
@@ -1659,13 +1659,12 @@ function ContextOfferTimelineRow({
             <span aria-hidden="true" className="text-muted-foreground/40">
               ·
             </span>
-            <button
-              type="button"
-              className="rounded-sm text-foreground/85 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            <InlineButton
+              className="text-foreground/85 hover:text-foreground"
               onClick={ctx.onCompactContext}
             >
               Compact
-            </button>
+            </InlineButton>
           </>
         ) : null}
       </span>

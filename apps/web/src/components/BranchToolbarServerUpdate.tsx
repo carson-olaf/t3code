@@ -65,7 +65,7 @@ export function BranchToolbarServerUpdate({
           manualLabel="Update"
           variant="ghost"
           size="xs"
-          className="h-7 px-1.5 font-normal text-foreground text-xs! sm:h-6"
+          className="font-normal text-xs!"
         />
       </TooltipTrigger>
       <TooltipPopup side="top">
