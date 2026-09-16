@@ -9,7 +9,10 @@ import {
   supportsDesktopAppUpdate,
   supportsServerUpdateThreadContinuation,
 } from "../versionSkew";
+import { CircleArrowUpIcon } from "lucide-react";
+
 import { ServerUpdateAction } from "./ServerUpdateAction";
+import { MenuItem } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 /**
@@ -18,11 +21,13 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
  * server matches the client, is ahead of it, or has an update in flight (the
  * thread's notice stack carries progress and failure).
  */
-export function useServerUpdateAvailability(environmentId: EnvironmentId) {
+export function useServerUpdateAvailability(environmentId: EnvironmentId | null) {
   const environment = useEnvironment(environmentId);
   const updateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const mismatch = resolveServerConfigVersionMismatch(environment?.serverConfig);
-  if (!environment || !mismatch || updateState.status !== "idle") return null;
+  if (environmentId === null || !environment || !mismatch || updateState.status !== "idle") {
+    return null;
+  }
   return {
     environmentId,
     serverLabel: environment.label,
@@ -73,5 +78,31 @@ export function BranchToolbarServerUpdate({
         {manual ? " Copies the update command to run there." : ""}
       </TooltipPopup>
     </Tooltip>
+  );
+}
+
+/** The same action as a row in the narrow strip's combined run-context menu. */
+export function BranchToolbarServerUpdateMenuItem({
+  update,
+}: {
+  readonly update: ServerUpdateAvailability;
+}) {
+  return (
+    <ServerUpdateAction
+      environmentId={update.environmentId}
+      serverLabel={update.serverLabel}
+      selfUpdate={update.selfUpdate}
+      desktopAppUpdate={update.desktopAppUpdate}
+      threadContinuation={update.threadContinuation}
+      targetVersion={update.targetVersion}
+      label={`Update ${update.serverLabel}`}
+      manualLabel={`Copy update command for ${update.serverLabel}`}
+      render={({ label, onClick }) => (
+        <MenuItem onClick={onClick}>
+          <CircleArrowUpIcon />
+          <span className="min-w-0 truncate">{label}</span>
+        </MenuItem>
+      )}
+    />
   );
 }

@@ -383,6 +383,7 @@ import {
 } from "./chat/ThreadErrorBanner";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { snoozeWakeDescription } from "./Sidebar.snooze";
+import { useServerUpdateAvailability } from "./BranchToolbarServerUpdate";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import {
   hasAvailableCompactionProvider,
@@ -2417,9 +2418,11 @@ export default function ChatView(props: ChatViewProps) {
     logicalProjectEnvironments.find(
       (environment) => environment.environmentId === activeThread?.environmentId,
     ) ?? null;
+  const activeServerUpdate = useServerUpdateAvailability(activeThread?.environmentId ?? null);
   const showComposerEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
     canPickEnvironment: hasMultipleEnvironments,
+    serverUpdateAvailable: activeServerUpdate !== null,
   });
 
   const openPullRequestDialog = useCallback(
@@ -5981,43 +5984,51 @@ export default function ChatView(props: ChatViewProps) {
   const unsettleThreadMutation = useAtomCommand(threadEnvironment.unsettle, {
     reportFailure: false,
   });
-  const handleUnsettleActiveThread = useCallback(async () => {
-    if (!activeThreadRef) return;
-    const result = await unsettleThreadMutation({
-      environmentId: activeThreadRef.environmentId,
-      input: { threadId: activeThreadRef.threadId, reason: "user" },
-    });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to un-settle thread",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    }
-  }, [activeThreadRef, unsettleThreadMutation]);
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
-  const handleUnsnoozeActiveThread = useCallback(async () => {
-    if (!activeThreadRef) return;
-    const result = await unsnoozeThreadMutation({
-      environmentId: activeThreadRef.environmentId,
-      input: { threadId: activeThreadRef.threadId, reason: "user" },
-    });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to wake thread",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    }
-  }, [activeThreadRef, unsnoozeThreadMutation]);
+  // Keyed by thread, not a boolean: a second click before the shell updates
+  // must not send a duplicate request, and a request resolving for thread A
+  // must never clear thread B's pending state.
+  const [releasingThreadKey, setReleasingThreadKey] = useState<string | null>(null);
+  const isReleasingActiveThread =
+    releasingThreadKey !== null && releasingThreadKey === activeThreadKey;
+  const releaseActiveThread = useCallback(
+    async (action: "unsettle" | "unsnooze") => {
+      if (!activeThreadRef) return;
+      const threadKey = scopedThreadKey(activeThreadRef);
+      if (releasingThreadKey === threadKey) return;
+      setReleasingThreadKey(threadKey);
+      try {
+        const mutate = action === "unsettle" ? unsettleThreadMutation : unsnoozeThreadMutation;
+        const result = await mutate({
+          environmentId: activeThreadRef.environmentId,
+          input: { threadId: activeThreadRef.threadId, reason: "user" },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: action === "unsettle" ? "Failed to un-settle thread" : "Failed to wake thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      } finally {
+        setReleasingThreadKey((current) => (current === threadKey ? null : current));
+      }
+    },
+    [activeThreadRef, releasingThreadKey, unsettleThreadMutation, unsnoozeThreadMutation],
+  );
+  const handleUnsettleActiveThread = useCallback(
+    () => releaseActiveThread("unsettle"),
+    [releaseActiveThread],
+  );
+  const handleUnsnoozeActiveThread = useCallback(
+    () => releaseActiveThread("unsnooze"),
+    [releaseActiveThread],
+  );
   const snoozeWakeLabel = activeThreadSnoozed
     ? snoozeWakeDescription(
         activeThreadShell?.snoozedUntil ?? "",
@@ -6032,6 +6043,7 @@ export default function ChatView(props: ChatViewProps) {
         ? {
             kind: "snoozed" as const,
             detail: `Wakes ${snoozeWakeLabel}. Click to wake now, or send a message.`,
+            releasing: isReleasingActiveThread,
             onRelease: () => {
               void handleUnsnoozeActiveThread();
             },
@@ -6040,12 +6052,19 @@ export default function ChatView(props: ChatViewProps) {
           ? {
               kind: "settled" as const,
               detail: "Click to un-settle, or send a message.",
+              releasing: isReleasingActiveThread,
               onRelease: () => {
                 void handleUnsettleActiveThread();
               },
             }
           : null,
-    [activeThreadSettled, handleUnsettleActiveThread, handleUnsnoozeActiveThread, snoozeWakeLabel],
+    [
+      activeThreadSettled,
+      handleUnsettleActiveThread,
+      handleUnsnoozeActiveThread,
+      isReleasingActiveThread,
+      snoozeWakeLabel,
+    ],
   );
   const parkedComposerPlaceholder =
     snoozeWakeLabel !== null

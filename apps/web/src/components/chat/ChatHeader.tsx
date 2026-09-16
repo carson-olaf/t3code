@@ -64,6 +64,8 @@ interface ChatHeaderProps {
   parkedState: {
     readonly kind: "settled" | "snoozed";
     readonly detail: string;
+    /** A release request is in flight, so a second click must not send another. */
+    readonly releasing: boolean;
     readonly onRelease: () => void;
   } | null;
   activeProject: EnvironmentProject | null;
@@ -415,11 +417,12 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipTrigger
                 render={
                   <Button
-                    size="xs"
+                    size="pill"
                     variant="ghost-muted"
                     data-thread-parked={parkedState.kind}
+                    disabled={parkedState.releasing}
                     onClick={parkedState.onRelease}
-                    className="ml-2 h-5 rounded-full border-border/80 px-1.5 text-[11px] sm:h-5 [:hover,[data-pressed]]:border-foreground/40"
+                    className="ml-2 border-border/80 [:hover,[data-pressed]]:border-foreground/40"
                   />
                 }
               >
