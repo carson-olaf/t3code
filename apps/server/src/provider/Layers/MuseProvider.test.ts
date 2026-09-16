@@ -12,7 +12,6 @@ import { vi } from "vite-plus/test";
 
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 import type { MuseSdkHost } from "../museSdk.ts";
-import { COMPACT_SLASH_COMMAND } from "../providerSnapshot.ts";
 import {
   checkMuseProviderStatus,
   discoverMuseModels,
@@ -86,7 +85,7 @@ describe("Muse provider defaults", () => {
   it.effect("advertises native compaction while an enabled provider is being checked", () =>
     Effect.gen(function* () {
       const snapshot = yield* makePendingMuseProvider(settings({ enabled: true }));
-      expect(snapshot.slashCommands).toEqual([COMPACT_SLASH_COMMAND]);
+      expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact", "goal"]);
     }),
   );
 
@@ -171,7 +170,7 @@ it.layer(NodeServices.layer)("Muse status", (it) => {
           async () => host,
         );
         expect(snapshot.status).toBe("ready");
-        expect(snapshot.slashCommands).toEqual([COMPACT_SLASH_COMMAND]);
+        expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact", "goal"]);
         expect(snapshot.auth).toEqual({ status: "unknown" });
         expect(snapshot.version).toBe("1.0.3-R2198.1");
         expect(snapshot.models.map((model) => model.slug)).toEqual([

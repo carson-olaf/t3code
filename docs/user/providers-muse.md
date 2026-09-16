@@ -37,6 +37,13 @@ The composer offers the host's Muse skills through `$` mentions. The catalog
 comes from `muse skills list`, so it honors Muse's own enablement and workspace
 trust, including bundled and plugin skills.
 
+## Session goals
+
+Use `/goal` to work with the native session goal: `/goal <objective>` sets it,
+bare `/goal` shows it, and `/goal edit|pause|resume|clear` manages it. Setting a
+goal while idle may wake a goal-driving turn that streams like any other turn.
+Goal changes need an idle session; finish or stop the running turn first.
+
 ## Continue conversations from the CLI
 
 Enable Muse before importing projects in the [welcome wizard](./welcome-wizard.md).

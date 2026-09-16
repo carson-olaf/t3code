@@ -82,6 +82,22 @@ export const MuseViewPage = Schema.Struct({
 });
 export const MuseTurnStartResult = Schema.Struct({ turnId: NonEmptyString });
 
+export const MuseGoal = Schema.Struct({
+  objective: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.String),
+  percentComplete: Schema.optional(Schema.Int),
+  currentWork: Schema.optional(Schema.String),
+  nextWork: Schema.optional(Schema.String),
+});
+export type MuseGoal = typeof MuseGoal.Type;
+
+export const MuseGoalCommandResult = Schema.Struct({
+  commandId: Schema.String,
+  status: Schema.String,
+  turnId: Schema.optional(Schema.String),
+});
+export type MuseGoalCommandResult = typeof MuseGoalCommandResult.Type;
+
 export const MuseApproval = Schema.Struct({
   approvalId: NonEmptyString,
   protectedWrite: Schema.optional(Schema.Boolean),

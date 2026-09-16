@@ -48,6 +48,8 @@ import {
   MuseCompactResult,
   MuseContextUsage,
   MuseDelta,
+  MuseGoal,
+  MuseGoalCommandResult,
   MuseItem,
   MuseItemEvent,
   MuseResumeCursor,
@@ -93,6 +95,8 @@ const decodeToolArgs = Schema.decodeUnknownSync(
 );
 const decodeResume = Schema.decodeUnknownSync(MuseResumeCursor);
 const decodeSessionResult = Schema.decodeUnknownSync(MuseSessionResult);
+const decodeGoal = Schema.decodeUnknownSync(MuseGoal);
+const decodeGoalCommandResult = Schema.decodeUnknownSync(MuseGoalCommandResult);
 const decodeViewPage = Schema.decodeUnknownSync(MuseViewPage);
 const decodeCompactResult = Schema.decodeUnknownSync(MuseCompactResult);
 const decodeAnswer = Schema.decodeUnknownSync(
@@ -137,6 +141,7 @@ interface SessionContext {
   historyCursor: string | undefined;
   historyTimer: ReturnType<typeof setTimeout> | undefined;
   reasoningEffort: string | undefined;
+  goal: MuseGoal | null | undefined;
 }
 
 export interface MuseAdapterOptions {
@@ -430,6 +435,9 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
           const turn = decodeTurnStart(event.params);
           if (turn.turnId !== result.session.activeTurnId)
             context.turns.add(TurnId.make(turn.turnId));
+        } else if (event.method === "session/goalChanged" && "goal" in event.params) {
+          // Seed pre-existing goals on resume; last writer wins like the live feed.
+          context.goal = event.params.goal === null ? null : decodeGoal(event.params.goal);
         }
       }
       cursor = page.nextCursor;
@@ -962,6 +970,11 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         });
         break;
       }
+      case "session/goalChanged": {
+        // Adopt wholesale; explicit null clears. Absent goal leaves state alone.
+        if ("goal" in params) context.goal = params.goal === null ? null : decodeGoal(params.goal);
+        break;
+      }
       case "session/viewHealthChanged":
         // Muse can keep executing after its projected event feed fails. Without
         // closing the broken connection, T3 never receives the final turn event.
@@ -1084,6 +1097,108 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
       await closeContext(context, "Muse session stopped.");
     });
 
+  type GoalCommand =
+    | { verb: "show" }
+    | { verb: "set" | "edit"; objective: string }
+    | { verb: "pause" | "resume" | "clear" };
+
+  // The MSP host does not interpret slash text; the TUI's /goal is a client of
+  // the goal/* methods. Only leading command position counts, like other CLIs.
+  const parseGoalCommand = (text: string | undefined): GoalCommand | undefined => {
+    if (!text) return undefined;
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("/goal")) return undefined;
+    const rest = trimmed.slice("/goal".length);
+    if (rest && !/^\s/.test(rest)) return undefined;
+    const args = rest.trim();
+    if (!args) return { verb: "show" };
+    const [head, ...tail] = args.split(/\s+/);
+    const tailText = tail.join(" ").trim();
+    switch (head) {
+      case "pause":
+      case "resume":
+      case "clear":
+        if (tailText) throw invalid("sendTurn", `Muse /goal ${head} takes no arguments.`);
+        return { verb: head };
+      case "edit":
+      case "set":
+        if (!tailText) throw invalid("sendTurn", `Muse /goal ${head} needs an objective.`);
+        return { verb: head, objective: tailText };
+      default:
+        return { verb: "set", objective: args };
+    }
+  };
+
+  const describeGoal = (goal: MuseGoal | null | undefined): string => {
+    if (goal === undefined) return "No goal has been observed for this session yet.";
+    if (goal === null) return "No goal is set for this session.";
+    const objective = goal.objective?.trim() || "(no objective)";
+    const status = goal.status?.trim();
+    const head = status ? `${objective} [${status}]` : objective;
+    const progress =
+      goal.percentComplete === undefined ? head : `${head} — ${goal.percentComplete}%`;
+    const work = [goal.currentWork?.trim(), goal.nextWork?.trim()].filter(Boolean);
+    return work.length ? `${progress}\n${work.join("\n")}` : progress;
+  };
+
+  const runGoalTurn = async (context: SessionContext, threadId: ThreadId, text: string) => {
+    const id = TurnId.make(context.host.connection.mintCommandId());
+    beginTurn(context, id);
+    recordItem(
+      context,
+      {
+        itemId: `goal-${id}`,
+        turnId: id,
+        kind: "agentMessage",
+        revision: 1,
+        status: "completed",
+        text,
+      },
+      { jsonrpc: "2.0", method: "item/completed", params: { sessionId: context.nativeSessionId } },
+    );
+    finishTurn(context, "completed");
+    return { threadId, turnId: id, resumeCursor: context.session.resumeCursor };
+  };
+
+  const runGoalCommand = async (
+    context: SessionContext,
+    threadId: ThreadId,
+    goalCommand: GoalCommand,
+  ) => {
+    if (context.active)
+      throw invalid("sendTurn", "Finish or stop the running turn before using /goal.");
+    if (goalCommand.verb === "show")
+      return runGoalTurn(context, threadId, describeGoal(context.goal));
+    const result = decodeGoalCommandResult(
+      await command(
+        context,
+        `goal/${goalCommand.verb}`,
+        {
+          ...("objective" in goalCommand ? { objective: goalCommand.objective } : {}),
+        },
+        context.host.connection.mintCommandId(),
+      ),
+    );
+    // Idle-only here, so a carried turn ID names a fresh goal-driving turn that
+    // streams like any other. A parked admission carries none and gets an ack.
+    if (result.turnId) {
+      const id = TurnId.make(result.turnId);
+      beginTurn(context, id);
+      return { threadId, turnId: id, resumeCursor: context.session.resumeCursor };
+    }
+    const ack =
+      goalCommand.verb === "set"
+        ? `Goal set: ${goalCommand.objective}`
+        : goalCommand.verb === "edit"
+          ? `Goal updated: ${goalCommand.objective}`
+          : goalCommand.verb === "pause"
+            ? "Goal paused."
+            : goalCommand.verb === "resume"
+              ? "Goal resumed."
+              : "Goal cleared.";
+    return runGoalTurn(context, threadId, ack);
+  };
+
   const startSession: ProviderAdapterShape<ProviderAdapterError>["startSession"] = (input) =>
     asRequest("startSession", async (signal) => {
       if (disposed) throw invalid("startSession", "Muse adapter has been stopped.");
@@ -1139,6 +1254,7 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         historyCursor: undefined,
         historyTimer: undefined,
         reasoningEffort: getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
+        goal: undefined,
       };
       sessions.set(input.threadId, context);
       const fail = (error: unknown) => {
@@ -1302,6 +1418,8 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
               throw invalid("sendTurn", "Muse SDK does not expose a dedicated plan mode.");
             const context = getContext(input.threadId);
             await context.notificationTail;
+            const goalCommand = parseGoalCommand(input.input);
+            if (goalCommand) return runGoalCommand(context, input.threadId, goalCommand);
             const modelSelection =
               input.modelSelection?.instanceId === instanceId ? input.modelSelection : undefined;
             const selectedEffort =

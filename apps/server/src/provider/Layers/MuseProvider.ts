@@ -3,6 +3,7 @@ import {
   type MuseSettings,
   type ServerProviderModel,
   type ServerProviderSkill,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as DateTime from "effect/DateTime";
@@ -31,6 +32,12 @@ const MUSE_PRESENTATION = {
   showInteractionModeToggle: false,
   reportsContextWindow: true,
 } as const;
+
+const GOAL_SLASH_COMMAND = {
+  name: "goal",
+  description: "Show, set, edit, pause, resume, or clear the session goal",
+  input: { hint: "[edit | pause | resume | clear | <objective>]" },
+} satisfies ServerProviderSlashCommand;
 
 export const MUSE_DEFAULT_MODEL = "muse-spark-1.3-contributor";
 
@@ -139,7 +146,7 @@ export const makePendingMuseProvider = Effect.fn("makePendingMuseProvider")(func
     enabled: settings.enabled,
     checkedAt: DateTime.formatIso(yield* DateTime.now),
     models: museModelsFromSettings([], settings.customModels),
-    slashCommands: settings.enabled ? [COMPACT_SLASH_COMMAND] : [],
+    slashCommands: settings.enabled ? [COMPACT_SLASH_COMMAND, GOAL_SLASH_COMMAND] : [],
     probe: {
       installed: false,
       version: null,
@@ -172,7 +179,7 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
       checkedAt,
       models: museModelsFromSettings(models, settings.customModels),
       skills,
-      slashCommands: [COMPACT_SLASH_COMMAND],
+      slashCommands: [COMPACT_SLASH_COMMAND, GOAL_SLASH_COMMAND],
       probe,
     });
   const versionResult = yield* Effect.gen(function* () {

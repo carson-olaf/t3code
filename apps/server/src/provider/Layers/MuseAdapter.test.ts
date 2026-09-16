@@ -67,6 +67,8 @@ function makeFakeHost() {
   let compactStatus = "accepted";
   let historyUnavailable = false;
   let readActiveOnce: string | undefined;
+  let goalState: Record<string, unknown> | null = null;
+  let wakeGoalTurn = false;
   const host: MuseSdkHost = {
     initializeResult: {
       experimentalApi: false,
@@ -148,6 +150,31 @@ function makeFakeHost() {
         }
         if (method === "session/compact")
           return { status: compactStatus, reason: "no_compactable_history" };
+        if (method === "goal/set" || method === "goal/edit") {
+          goalState = {
+            objective: String(params.objective ?? ""),
+            status: "active",
+            percentComplete: 0,
+          };
+          emit("session/goalChanged", { goal: goalState });
+          if (wakeGoalTurn && !activeTurnId) {
+            activeTurnId = options?.commandId ?? "goal-turn";
+            emit("turn/started", { turnId: activeTurnId });
+            return { commandId: options?.commandId, status: "accepted", turnId: activeTurnId };
+          }
+          return { commandId: options?.commandId, status: "accepted" };
+        }
+        if (method === "goal/pause" || method === "goal/resume") {
+          if (goalState)
+            goalState = { ...goalState, status: method === "goal/pause" ? "paused" : "active" };
+          emit("session/goalChanged", { goal: goalState });
+          return { commandId: options?.commandId, status: "accepted" };
+        }
+        if (method === "goal/clear") {
+          goalState = null;
+          emit("session/goalChanged", { goal: null });
+          return { commandId: options?.commandId, status: "accepted" };
+        }
         if (method === "approval/decide")
           emit("approval/resolved", { approvalId: params.approvalId, decision: "approved" });
         if (method === "userInput/answer")
@@ -209,6 +236,9 @@ function makeFakeHost() {
     },
     compactStatus: (status: string) => {
       compactStatus = status;
+    },
+    wakeGoalTurn: () => {
+      wakeGoalTurn = true;
     },
     crash: () => {
       resolveExit({ code: 1, signal: null });
@@ -1919,6 +1949,178 @@ describe("MuseAdapter", () => {
         true,
       );
       assert.equal(fake.closeCount, 1);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("sets, shows, pauses, resumes, and clears the session goal", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+      });
+      yield* adapter.startSession(startInput);
+      const runGoal = (input: string) =>
+        Effect.gen(function* () {
+          yield* adapter.sendTurn({ threadId, input });
+          const events = yield* collectUntil(adapter, "turn.completed");
+          return events.filter((event) => event.type === "content.delta").at(-1)?.payload.delta;
+        });
+      assert.equal(yield* runGoal("/goal Ship v5"), "Goal set: Ship v5");
+      assert.equal(
+        fake.calls.find((call) => call.method === "goal/set")?.params.objective,
+        "Ship v5",
+      );
+      assert.include(yield* runGoal("/goal"), "Ship v5 [active] — 0%");
+      assert.equal(yield* runGoal("/goal pause"), "Goal paused.");
+      assert.include(yield* runGoal("/goal"), "[paused]");
+      assert.equal(yield* runGoal("/goal resume"), "Goal resumed.");
+      assert.equal(yield* runGoal("/goal edit Ship v6"), "Goal updated: Ship v6");
+      assert.include(yield* runGoal("/goal"), "Ship v6");
+      assert.equal(yield* runGoal("/goal clear"), "Goal cleared.");
+      assert.equal(yield* runGoal("/goal"), "No goal is set for this session.");
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("wakes a goal-driving turn when the native session starts one", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      fake.wakeGoalTurn();
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+      });
+      yield* adapter.startSession(startInput);
+      const turn = yield* adapter.sendTurn({ threadId, input: "/goal Ship v5" });
+      fake.emit("item/completed", {
+        turnId: turn.turnId,
+        item: {
+          itemId: "goal-item",
+          turnId: turn.turnId,
+          kind: "agentMessage",
+          revision: 1,
+          status: "completed",
+          text: "Working on it",
+        },
+      });
+      fake.emit("turn/completed", { turnId: turn.turnId, terminal: "completed" });
+      const events = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(
+        events.find((event) => event.type === "turn.completed")?.payload.state,
+        "completed",
+      );
+      assert.include(
+        events
+          .filter((event) => event.type === "content.delta")
+          .map((event) => event.payload.delta),
+        "Working on it",
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects goal commands during an active turn", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+      });
+      yield* adapter.startSession(startInput);
+      const turn = yield* adapter.sendTurn({ threadId, input: "Hello" });
+      for (const input of ["/goal pause", "/goal"]) {
+        const result = yield* adapter.sendTurn({ threadId, input }).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.include(result.failure.message, "running turn");
+        }
+      }
+      assert.isFalse(fake.calls.some((call) => call.method.startsWith("goal/")));
+      fake.emit("turn/completed", { turnId: turn.turnId, terminal: "completed" });
+      yield* collectUntil(adapter, "turn.completed");
+      yield* adapter.sendTurn({ threadId, input: "/goal" });
+      const events = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(
+        events.filter((event) => event.type === "content.delta").at(-1)?.payload.delta,
+        "No goal has been observed for this session yet.",
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("treats goal-like text outside command position as a normal turn", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+      });
+      yield* adapter.startSession(startInput);
+      const turn = yield* adapter.sendTurn({ threadId, input: "/goals are great" });
+      const started = fake.calls.find((call) => call.method === "turn/start");
+      assert.isDefined(started);
+      assert.equal(
+        (started?.params as { displayText?: unknown } | undefined)?.displayText,
+        "/goals are great",
+      );
+      fake.emit("turn/completed", { turnId: turn.turnId, terminal: "completed" });
+      yield* collectUntil(adapter, "turn.completed");
+      yield* adapter.sendTurn({ threadId, input: "  /goal Trimmed  " });
+      assert.equal(
+        fake.calls.find((call) => call.method === "goal/set")?.params.objective,
+        "Trimmed",
+      );
+      yield* collectUntil(adapter, "turn.completed");
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("seeds the tracked goal from resumed history pages", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      fake.unavailableHistory();
+      fake.pageHistory([
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                item: {
+                  itemId: "saved-item",
+                  turnId: "saved-turn",
+                  kind: "agentMessage",
+                  revision: 1,
+                  status: "completed",
+                  text: "Saved response",
+                },
+                viewCursor: "resume-head",
+              },
+            },
+            {
+              method: "session/goalChanged",
+              params: {
+                sessionId: "saved-muse-session",
+                goal: { objective: "Seeded objective", status: "active", percentComplete: 40 },
+                viewCursor: "goal-head",
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+        historyPollIntervalMs: 1,
+      });
+      yield* adapter.startSession({
+        ...startInput,
+        resumeCursor: { sessionId: "saved-muse-session" },
+      });
+      yield* adapter.sendTurn({ threadId, input: "/goal" });
+      const events = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(
+        events.filter((event) => event.type === "content.delta").at(-1)?.payload.delta,
+        "Seeded objective [active] — 40%",
+      );
+      assert.isFalse(fake.calls.some((call) => call.method.startsWith("goal/")));
+      yield* adapter.stopSession(threadId);
     }).pipe(Effect.provide(testLayer)),
   );
 
