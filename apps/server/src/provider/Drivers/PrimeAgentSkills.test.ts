@@ -75,6 +75,28 @@ describe("discoverPrimeAgentSkills", () => {
           path.join(workspace, ".agents", "skills", "ignored.md"),
           "---\ndescription: must not appear\n---\n",
         );
+        // Supporting files inside a skill package are never traversed: deep
+        // asset trees cannot exhaust the scan budget or shadow skills.
+        const assetDir = path.join(
+          workspace,
+          ".prime",
+          "agent",
+          "skills",
+          "local",
+          "assets",
+          "nested",
+        );
+        yield* fileSystem.makeDirectory(assetDir, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(assetDir, "SKILL.md"),
+          "---\ndescription: shadowed\n---\n",
+        );
+        // Skills nested under plain directories still resolve.
+        yield* writeSkill(
+          path.join(workspace, ".agents", "skills", "group"),
+          "nested",
+          "---\ndescription: nested skill\n---\n",
+        );
 
         // Ancestor levels resolve from a nested cwd up to the git root.
         const nested = path.join(workspace, "nested", "deep");
@@ -95,6 +117,13 @@ describe("discoverPrimeAgentSkills", () => {
             displayName: "Local helper",
             description: "project local",
             path: path.join(workspace, ".prime", "agent", "skills", "local", "SKILL.md"),
+            scope: "project",
+            enabled: true,
+          },
+          {
+            name: "nested",
+            description: "nested skill",
+            path: path.join(workspace, ".agents", "skills", "group", "nested", "SKILL.md"),
             scope: "project",
             enabled: true,
           },

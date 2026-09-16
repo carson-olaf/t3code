@@ -38,6 +38,7 @@ import {
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
+import { discoverMuseSkills } from "./MuseSkills.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("muse");
 const decodeMuseSettings = Schema.decodeSync(MuseSettings);
@@ -168,6 +169,25 @@ export const MuseDriver: ProviderDriver<MuseSettings, MuseDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
+        snapshotForCwd: (cwd) =>
+          !effectiveConfig.enabled
+            ? snapshot.getSnapshot
+            : Effect.all([
+                snapshot.getSnapshot,
+                discoverMuseSkills(effectiveConfig, processEnvironment, cwd).pipe(
+                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                  Effect.provideService(Path.Path, path),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderDriverError({
+                        driver: DRIVER_KIND,
+                        instanceId,
+                        detail: `Failed to discover Muse Code skills for '${cwd}'`,
+                        cause,
+                      }),
+                  ),
+                ),
+              ]).pipe(Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills }))),
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

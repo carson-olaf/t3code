@@ -31,6 +31,12 @@ enable Muse in that environment's provider settings. Connect to that environment
 when you want work to run on the second host. Signing in on one host does not sign
 in the other.
 
+## Skills
+
+The composer offers the host's Muse skills through `$` mentions. The catalog
+comes from `muse skills list`, so it honors Muse's own enablement and workspace
+trust, including bundled and plugin skills.
+
 ## Continue conversations from the CLI
 
 Enable Muse before importing projects in the [welcome wizard](./welcome-wizard.md).

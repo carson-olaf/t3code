@@ -197,6 +197,14 @@ const discoverSkillsInRoot = Effect.fn("discoverPrimeAgentSkillsInRoot")(functio
     if (skillInfo?.type === "File") {
       const frontmatter = yield* readSkillFile(skillPath, input.budget);
       pushSkill(path.basename(directory), skillPath, frontmatter);
+      // A skill package is a discovery boundary: supporting files inside a
+      // skill (examples, scripts, vendored assets) can be arbitrarily large
+      // and never contain separate skills. Plain directories without SKILL.md
+      // are still traversed so nested skills resolve. The scan root itself is
+      // a container, never a boundary.
+      if (depth > 0) {
+        return;
+      }
     }
 
     if (!insideRoot) {

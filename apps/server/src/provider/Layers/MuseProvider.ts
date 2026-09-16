@@ -2,6 +2,7 @@ import {
   type CustomModelSetting,
   type MuseSettings,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as DateTime from "effect/DateTime";
@@ -11,6 +12,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { ChildProcess } from "effect/unstable/process";
 
+import { discoverMuseSkills } from "../Drivers/MuseSkills.ts";
 import { createMuseSdkHost, makeMuseEnvironment, type MuseSdkHost } from "../museSdk.ts";
 import { parseMuseVersion } from "../museMaintenance.ts";
 import { museModelCapabilities, readMuseModelEfforts } from "../museModelCatalog.ts";
@@ -159,12 +161,17 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
   if (!settings.enabled) return yield* makePendingMuseProvider(settings);
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const museEnvironment = makeMuseEnvironment(environment);
-  const snapshot = (probe: ProviderProbeResult, models: ReadonlyArray<ServerProviderModel> = []) =>
+  const snapshot = (
+    probe: ProviderProbeResult,
+    models: ReadonlyArray<ServerProviderModel> = [],
+    skills: ReadonlyArray<ServerProviderSkill> = [],
+  ) =>
     buildServerProvider({
       presentation: MUSE_PRESENTATION,
       enabled: true,
       checkedAt,
       models: museModelsFromSettings(models, settings.customModels),
+      skills,
       slashCommands: [COMPACT_SLASH_COMMAND],
       probe,
     });
@@ -231,6 +238,10 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
     });
   }
   const models = catalog.success.value;
+  const skills = yield* discoverMuseSkills(settings, museEnvironment, cwd).pipe(
+    Effect.tapError((cause) => Effect.logDebug("Muse skill discovery failed.", { cause })),
+    Effect.orElseSucceed(() => []),
+  );
   return snapshot(
     {
       installed: true,
@@ -243,5 +254,6 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
           : "Muse Code returned no models. Run `muse login` on this T3 server host and refresh its status.",
     },
     models,
+    skills,
   );
 });
