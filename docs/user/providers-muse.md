@@ -68,7 +68,10 @@ sign-in attempt.
 If Muse reports lost event updates or an unavailable progress feed, T3 closes
 the connection and marks the turn failed instead of leaving it working indefinitely.
 Resume to reconnect. Muse retains its saved conversation, but missing updates
-are not restored in the T3 Code chat. If Muse cannot read its saved history,
+are not restored in the T3 Code chat. When the resumed session's live feed remains
+unavailable, T3 recovers new replies from saved history after each turn finishes.
+Live text and tool updates may be delayed for that session. If Muse cannot read
+its saved history either,
 T3 reports that error rather than starting a session with incomplete history.
 
 ## Current limitations

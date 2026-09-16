@@ -134,6 +134,8 @@ interface SessionContext {
   stopped: boolean;
   closing: Promise<void> | undefined;
   notificationTail: Promise<void>;
+  historyCursor: string | undefined;
+  historyTimer: ReturnType<typeof setTimeout> | undefined;
   reasoningEffort: string | undefined;
 }
 
@@ -143,6 +145,7 @@ export interface MuseAdapterOptions {
   readonly createHost?: typeof createMuseSdkHost;
   readonly requestTimeoutMs?: number;
   readonly interruptTimeoutMs?: number;
+  readonly historyPollIntervalMs?: number;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly modelCatalog?: Effect.Effect<ReadonlyArray<ServerProviderModel>>;
 }
@@ -290,6 +293,7 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
   const closeContext = (context: SessionContext, reason: string, failed = false) => {
     if (context.closing) return context.closing;
     context.stopped = true;
+    clearTimeout(context.historyTimer);
     if (failed)
       emit(context, {
         type: "runtime.error",
@@ -410,6 +414,12 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         ),
       );
       for (const event of page.events) {
+        if (
+          history.noneReason === "projectionUnavailable" &&
+          typeof event.params.viewCursor === "string" &&
+          event.params.viewCursor
+        )
+          context.historyCursor = event.params.viewCursor;
         if (
           event.method === "item/started" ||
           event.method === "item/updated" ||
@@ -1010,6 +1020,62 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
       );
     });
 
+  // Some Muse sessions can page durable events but cannot project a live feed.
+  // Continue from the observed resume head, never replaying historical turns.
+  const scheduleHistoryPoll = (context: SessionContext) => {
+    if (context.stopped || !context.historyCursor) return;
+    context.historyTimer = setTimeout(() => {
+      context.notificationTail = context.notificationTail
+        .then(async () => {
+          if (context.stopped) return;
+          // Muse's cold projection synthesizes terminal items at a growing log
+          // end. Read pages only after the native turn settles, or those
+          // temporary cursors can hide the eventual reply.
+          const current = decodeSessionResult(
+            await bounded(
+              context,
+              "session/read",
+              context.host.connection.request("session/read", {
+                sessionId: context.nativeSessionId,
+                excludeItems: true,
+              }),
+            ),
+          );
+          if (current.session.activeTurnId) return;
+          let more: string | null;
+          do {
+            const page = decodeViewPage(
+              await bounded(
+                context,
+                "view/page",
+                context.host.connection.request("view/page", {
+                  sessionId: context.nativeSessionId,
+                  direction: "forward",
+                  limit: 1000,
+                  cursor: context.historyCursor,
+                }),
+              ),
+            );
+            for (const event of page.events) {
+              if (context.stopped) return;
+              const cursor = event.params.viewCursor;
+              if (typeof cursor !== "string" || cursor === context.historyCursor)
+                throw new Error("Muse progress paging did not advance.");
+              await writeNativeEvent(context.session.threadId, event);
+              await handleNotification(context, { jsonrpc: "2.0", ...event });
+              context.historyCursor = cursor;
+            }
+            more = page.nextCursor;
+            if (more && page.events.length === 0)
+              throw new Error("Muse progress paging did not advance.");
+          } while (more && !context.stopped);
+        })
+        .then(() => scheduleHistoryPoll(context))
+        .catch((error) => closeContext(context, describeError(error), true));
+    }, options?.historyPollIntervalMs ?? 1000);
+    context.historyTimer.unref();
+  };
+
   const stopSession = (threadId: ThreadId) =>
     asRequest("stopSession", async () => {
       const context = sessions.get(threadId);
@@ -1070,6 +1136,8 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         // Resume can reissue pending requests before history loading finishes.
         // Process that suffix only after the active turn has been restored.
         notificationTail: notificationsReady,
+        historyCursor: undefined,
+        historyTimer: undefined,
         reasoningEffort: getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
       };
       sessions.set(input.threadId, context);
@@ -1077,6 +1145,8 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         void closeContext(context, describeError(error), true).catch(() => {});
       };
       host.connection.onNotification((notification) => {
+        // Durable pages own delivery in fallback mode; requests still arrive live.
+        if (context.historyCursor && notification.params?.viewCursor) return;
         context.notificationTail = context.notificationTail
           .then(async () => {
             await writeNativeEvent(input.threadId, notification);
@@ -1124,14 +1194,12 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
                 },
           ),
         );
-        if (result.history?.noneReason === "projectionUnavailable")
-          throw new Error(
-            "Muse could not read this session's saved progress. Its history projection is unavailable. The saved conversation remains in Muse; reconnect after the CLI can read it again.",
-          );
         if (result.session.sessionId !== context.nativeSessionId)
           throw new Error("Muse returned an unexpected session identity.");
         context.nativeSessionId = result.session.sessionId;
         if (resume) {
+          // Inline projection can be unavailable while durable view pages remain readable.
+          // Let loadHistory try those pages and surface an error only if that also fails.
           await loadHistory(context, result);
           if (result.session.activeTurnId)
             beginTurn(context, TurnId.make(result.session.activeTurnId));
@@ -1158,6 +1226,12 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
         }
         if (disposed || context.stopped || signal.aborted)
           throw invalid("startSession", "Muse session was stopped during initialization.");
+        if (result.history?.noneReason === "projectionUnavailable") {
+          if (!result.viewCursor && !context.historyCursor)
+            throw new Error("Muse did not provide a resume cursor for progress recovery.");
+          context.historyCursor = result.viewCursor || context.historyCursor;
+          scheduleHistoryPoll(context);
+        }
         const cursor = { sessionId: context.nativeSessionId };
         context.session = {
           ...context.session,

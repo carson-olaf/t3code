@@ -50,6 +50,7 @@ export const MuseItem = Schema.Struct({
 export type MuseItem = typeof MuseItem.Type;
 
 export const MuseSessionResult = Schema.Struct({
+  viewCursor: Schema.optional(Schema.String),
   session: Schema.Struct({
     sessionId: NonEmptyString,
     modelId: Schema.optional(Schema.NullOr(Schema.String)),

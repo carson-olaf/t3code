@@ -66,6 +66,7 @@ function makeFakeHost() {
   let sessionResultId: string | undefined;
   let compactStatus = "accepted";
   let historyUnavailable = false;
+  let readActiveOnce: string | undefined;
   const host: MuseSdkHost = {
     initializeResult: {
       experimentalApi: false,
@@ -92,6 +93,12 @@ function makeFakeHost() {
       },
       request: async (method, params = {}) => {
         calls.push({ method, params });
+        if (rejectMethod === method) throw new Error("Native request rejected.");
+        if (method === "session/read" && readActiveOnce) {
+          const turnId = readActiveOnce;
+          readActiveOnce = undefined;
+          return { session: { sessionId: nativeSessionId, activeTurnId: turnId } };
+        }
         if (method === "view/page") {
           const pageIndex =
             params.cursor === undefined
@@ -116,6 +123,7 @@ function makeFakeHost() {
           nativeSessionId = String(params.sessionId);
           await beforeSessionAck?.();
           return {
+            viewCursor: historyUnavailable ? "" : "resume-head",
             session: {
               sessionId: sessionResultId ?? nativeSessionId,
               modelId: params.modelId ?? "muse-spark-1.3-contributor",
@@ -166,6 +174,9 @@ function makeFakeHost() {
         params: { sessionId: nativeSessionId, ...params },
       }),
     history,
+    readActiveOnce: (turnId: string) => {
+      readActiveOnce = turnId;
+    },
     unavailableHistory: () => {
       historyUnavailable = true;
     },
@@ -1577,25 +1588,74 @@ describe("MuseAdapter", () => {
       }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect("rejects resume when Muse cannot project saved history", () =>
+  it.effect("resumes with paged history when the inline projection is unavailable", () =>
     Effect.gen(function* () {
       const fake = makeFakeHost();
       fake.unavailableHistory();
-      const adapter = yield* makeMuseAdapter(settings, { createHost: async () => fake.host });
-      const error = yield* adapter
-        .startSession({ ...startInput, resumeCursor: { sessionId: "saved-muse-session" } })
-        .pipe(Effect.flip);
-      assert.include(error.message, "history projection is unavailable");
-      assert.equal(fake.closeCount, 1);
-      const events = yield* collectUntil(adapter, "session.exited");
+      const item = {
+        itemId: "saved-item",
+        turnId: "saved-turn",
+        kind: "agentMessage",
+        revision: 1,
+        status: "completed",
+        text: "Saved response",
+      };
+      fake.pageHistory([
+        {
+          events: [{ method: "item/completed", params: { item, viewCursor: "resume-head" } }],
+          nextCursor: null,
+        },
+      ]);
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => fake.host,
+        historyPollIntervalMs: 1,
+      });
+      yield* adapter.startSession({
+        ...startInput,
+        resumeCursor: { sessionId: "saved-muse-session" },
+      });
+      const snapshot = yield* adapter.readThread(threadId);
+      assert.deepEqual(snapshot.turns, [{ id: TurnId.make("saved-turn"), items: [item] }]);
+      const turn = yield* adapter.sendTurn({ threadId, input: "Continue" });
+      fake.readActiveOnce(turn.turnId);
+      fake.pageHistory([
+        { events: [], nextCursor: "resume-head" },
+        {
+          events: [
+            {
+              method: "item/completed",
+              params: {
+                sessionId: "saved-muse-session",
+                viewCursor: "reply-head",
+                item: { ...item, itemId: "new-item", turnId: turn.turnId, text: "Recovered reply" },
+              },
+            },
+            {
+              method: "turn/completed",
+              params: {
+                sessionId: "saved-muse-session",
+                turnId: turn.turnId,
+                terminal: "completed",
+                viewCursor: "completed-head",
+              },
+            },
+          ],
+          nextCursor: null,
+        },
+      ]);
+      const events = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(events.filter((event) => event.type === "turn.started").length, 1);
       assert.equal(
-        events.some((event) => event.type === "session.started"),
-        false,
+        events.find((event) => event.type === "turn.completed")?.payload.state,
+        "completed",
       );
-      assert.equal(
-        events.find((event) => event.type === "session.exited")?.payload.recoverable,
-        true,
+      assert.deepEqual(
+        events.filter((e) => e.type === "content.delta").map((e) => e.payload.delta),
+        ["Recovered reply"],
       );
+      assert.isAtLeast(fake.calls.filter((c) => c.method === "session/read").length, 2);
+      assert.equal(fake.closeCount, 0);
+      yield* adapter.stopSession(threadId);
     }).pipe(Effect.provide(testLayer)),
   );
 
