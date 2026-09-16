@@ -1339,6 +1339,15 @@ describe("deriveMessagesTimelineRows", () => {
     // A running turn takes the slot back: the offer is for the next send, not this one.
     const working = deriveMessagesTimelineRows({ ...base, isWorking: true });
     expect(working.some((row) => row.kind === "context-offer")).toBe(false);
+
+    // A queued message has already decided the next send, so the offer is stale.
+    const queued = deriveMessagesTimelineRows({
+      ...base,
+      isWorking: false,
+      queuedMessages: [queuedMessage("q1", "next")],
+    });
+    expect(queued.some((row) => row.kind === "context-offer")).toBe(false);
+    expect(queued.at(-1)?.kind).toBe("queued-message");
   });
 
   it("keeps subagent spawn rows outside turn folds even after they settle", () => {

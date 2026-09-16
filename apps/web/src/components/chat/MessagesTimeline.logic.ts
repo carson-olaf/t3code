@@ -1352,7 +1352,10 @@ export function deriveMessagesTimelineRows(input: {
       createdAt: input.activeTurnStartedAt,
     });
   }
-  if (input.contextOffer && !input.isWorking) {
+  // The offer is for the next send. A running turn or a queued message means
+  // that send is already decided, so the row would only be stale.
+  const hasQueuedMessages = (input.queuedMessages?.length ?? 0) > 0;
+  if (input.contextOffer && !input.isWorking && !hasQueuedMessages) {
     nextRows.push({
       kind: "context-offer",
       id: CONTEXT_OFFER_ROW_ID,
