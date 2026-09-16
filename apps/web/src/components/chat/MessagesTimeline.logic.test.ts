@@ -1344,7 +1344,20 @@ describe("deriveMessagesTimelineRows", () => {
     const queued = deriveMessagesTimelineRows({
       ...base,
       isWorking: false,
-      queuedMessages: [queuedMessage("q1", "next")],
+      queuedMessages: [
+        {
+          id: "q1",
+          prompt: "next",
+          images: [],
+          files: [],
+          terminalContexts: [],
+          previewAnnotations: [],
+          reviewComments: [],
+          submissionIntent: "foreground",
+          queuedAfterToolActivityId: null,
+          createdAt: "2026-01-01T00:11:00Z",
+        },
+      ],
     });
     expect(queued.some((row) => row.kind === "context-offer")).toBe(false);
     expect(queued.at(-1)?.kind).toBe("queued-message");
