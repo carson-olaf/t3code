@@ -11,7 +11,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { AlarmClockIcon, ChevronDownIcon, CircleCheckIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -55,6 +55,16 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
+  /**
+   * A settled or snoozed thread says so next to its title, since the header is
+   * the one thread-scoped spot that stays on screen at any scroll position.
+   * Clicking the pill is the way out. Null for an active thread.
+   */
+  parkedState: {
+    readonly kind: "settled" | "snoozed";
+    readonly detail: string;
+    readonly onRelease: () => void;
+  } | null;
   activeProject: EnvironmentProject | null;
   openInCwd: string | null;
   activeProjectScripts: ReadonlyArray<ProjectScript> | undefined;
@@ -124,6 +134,7 @@ export const ChatHeader = memo(function ChatHeader({
   draftId,
   activeThreadTitle,
   isServerThread,
+  parkedState,
   activeProject,
   openInCwd,
   activeProjectScripts,
@@ -398,6 +409,28 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
+          {parkedState ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    data-thread-parked={parkedState.kind}
+                    onClick={parkedState.onRelease}
+                    className="ml-2 inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 rounded-full border border-border/80 px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                }
+              >
+                {parkedState.kind === "settled" ? (
+                  <CircleCheckIcon aria-hidden className="size-3" />
+                ) : (
+                  <AlarmClockIcon aria-hidden className="size-3" />
+                )}
+                {parkedState.kind === "settled" ? "Settled" : "Snoozed"}
+              </TooltipTrigger>
+              <TooltipPopup side="bottom">{parkedState.detail}</TooltipPopup>
+            </Tooltip>
+          ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
       <div
