@@ -64,3 +64,10 @@ the workspace must not have full host access.
 Python tool activity includes the executing cell. Native subagent updates show
 queued, running, completed, failed, or stopped work. Background children can
 continue after the main reply; their own reported status determines completion.
+
+## Rewind, Compact, And Skills
+
+Rewind trims the thread transcript. Only a new thread restarts the native Prime
+Agent session. Context compaction sends Prime Agent's `/compact` command as a turn.
+The composer offers Prime Agent skills discovered from `.prime/agent/skills` and
+`.agents/skills` in the home directory and project tree.
