@@ -42,8 +42,6 @@ import {
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import {
   BranchToolbarServerUpdate,
-  BranchToolbarServerUpdateMenuItem,
-  type ServerUpdateAvailability,
   useServerUpdateAvailability,
 } from "./BranchToolbarServerUpdate";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -108,8 +106,6 @@ interface MobileRunContextSelectorProps {
   onEnvModeChange: (mode: EnvMode) => void;
   previousWorktreeLabel: string | null;
   onUsePreviousWorktree: () => void;
-  /** An update waiting on the active server. The narrow menu offers it as an item. */
-  serverUpdate: ServerUpdateAvailability | null;
 }
 
 const MobileRunContextSelector = memo(function MobileRunContextSelector({
@@ -127,7 +123,6 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   onEnvModeChange,
   previousWorktreeLabel,
   onUsePreviousWorktree,
-  serverUpdate,
 }: MobileRunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(
@@ -183,15 +178,12 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
 
   if (isLocked) {
     return (
-      <>
-        <span
-          className="inline-flex h-7 min-w-0 max-w-[48%] flex-initial items-center justify-start gap-1 rounded-md border border-transparent px-[calc(--spacing(2)-1px)] font-normal text-muted-foreground/70 text-xs sm:h-6"
-          data-composer-context-control
-        >
-          {triggerContent}
-        </span>
-        {serverUpdate ? <BranchToolbarServerUpdate update={serverUpdate} /> : null}
-      </>
+      <span
+        className="inline-flex h-7 min-w-0 max-w-[48%] flex-initial items-center justify-start gap-1 rounded-md border border-transparent px-[calc(--spacing(2)-1px)] font-normal text-muted-foreground/70 text-xs sm:h-6"
+        data-composer-context-control
+      >
+        {triggerContent}
+      </span>
     );
   }
 
@@ -295,14 +287,6 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
             ) : null}
           </MenuRadioGroup>
         </MenuGroup>
-        {serverUpdate ? (
-          <>
-            <MenuSeparator />
-            <MenuGroup>
-              <BranchToolbarServerUpdateMenuItem update={serverUpdate} />
-            </MenuGroup>
-          </>
-        ) : null}
       </MenuPopup>
     </Menu>
   );
@@ -628,7 +612,6 @@ export const BranchToolbar = memo(function BranchToolbar({
             onEnvModeChange={onEnvModeChange}
             previousWorktreeLabel={previousWorktreeLabel}
             onUsePreviousWorktree={onUsePreviousWorktree}
-            serverUpdate={serverUpdate}
           />
         </div>
       ) : null}

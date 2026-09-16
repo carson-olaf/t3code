@@ -9,10 +9,7 @@ import {
   supportsDesktopAppUpdate,
   supportsServerUpdateThreadContinuation,
 } from "../versionSkew";
-import { CircleArrowUpIcon } from "lucide-react";
-
 import { ServerUpdateAction } from "./ServerUpdateAction";
-import { MenuItem } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 /**
@@ -78,31 +75,5 @@ export function BranchToolbarServerUpdate({
         {manual ? " Copies the update command to run there." : ""}
       </TooltipPopup>
     </Tooltip>
-  );
-}
-
-/** The same action as a row in the narrow strip's combined run-context menu. */
-export function BranchToolbarServerUpdateMenuItem({
-  update,
-}: {
-  readonly update: ServerUpdateAvailability;
-}) {
-  return (
-    <ServerUpdateAction
-      environmentId={update.environmentId}
-      serverLabel={update.serverLabel}
-      selfUpdate={update.selfUpdate}
-      desktopAppUpdate={update.desktopAppUpdate}
-      threadContinuation={update.threadContinuation}
-      targetVersion={update.targetVersion}
-      label={`Update ${update.serverLabel}`}
-      manualLabel={`Copy update command for ${update.serverLabel}`}
-      render={({ label, onClick }) => (
-        <MenuItem onClick={onClick}>
-          <CircleArrowUpIcon />
-          <span className="min-w-0 truncate">{label}</span>
-        </MenuItem>
-      )}
-    />
   );
 }

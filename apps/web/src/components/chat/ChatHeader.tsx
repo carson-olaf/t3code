@@ -417,12 +417,12 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipTrigger
                 render={
                   <Button
-                    size="pill"
-                    variant="ghost-outline"
+                    size="xs"
+                    variant="ghost-muted"
                     data-thread-parked={parkedState.kind}
                     disabled={parkedState.releasing}
                     onClick={parkedState.onRelease}
-                    className="ml-2"
+                    className="ml-2 h-5 rounded-full border-border/80 px-1.5 text-[11px] sm:h-5 [:hover,[data-pressed]]:border-foreground/40 [&_svg:not([class*='size-'])]:size-3 sm:[&_svg:not([class*='size-'])]:size-3"
                   />
                 }
               >

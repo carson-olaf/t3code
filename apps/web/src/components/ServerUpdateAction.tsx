@@ -5,7 +5,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { CircleArrowUpIcon } from "lucide-react";
-import { type ComponentProps, type ReactNode, useRef, useState } from "react";
+import { type ComponentProps, useRef, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -51,12 +51,6 @@ type UpdateButtonProps = Pick<ComponentProps<typeof Button>, "variant" | "size" 
   readonly manualLabel?: string;
   /** "icon" renders a compact icon button with the label in a tooltip. */
   readonly appearance?: "button" | "icon";
-  /**
-   * Render the action as something other than a Button, such as a menu item.
-   * Receives the resolved label and the click handler; the confirm dialog and
-   * copy fallback stay inside this component.
-   */
-  readonly render?: (action: { readonly label: string; readonly onClick: () => void }) => ReactNode;
 };
 
 function useServerUpdate() {
@@ -207,7 +201,6 @@ export function ServerUpdateAction({
   size = "xs",
   className,
   appearance = "button",
-  render,
 }: Omit<ServerUpdateTarget, "continueThreadsAfterServerUpdate"> & UpdateButtonProps) {
   const isDesktopAppUpdate = selfUpdate === "desktop-managed";
   const continueThreadsAfterServerUpdate = useEnvironmentSettings(
@@ -274,10 +267,6 @@ export function ServerUpdateAction({
     manualCommand !== null
       ? () => copyToClipboard(manualCommand, { command: manualCommand })
       : () => void handleUpdate();
-
-  if (render) {
-    return render({ label: actionLabel, onClick });
-  }
 
   if (appearance === "icon") {
     return (
