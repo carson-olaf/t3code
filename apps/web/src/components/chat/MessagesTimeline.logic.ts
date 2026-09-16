@@ -1373,7 +1373,7 @@ export function deriveMessagesTimelineRows(input: {
   return rows;
 }
 
-export const CONTEXT_OFFER_ROW_ID = "context-offer-row";
+const CONTEXT_OFFER_ROW_ID = "context-offer-row";
 
 export const WORKTREE_SETUP_ROW_ID = "worktree-setup-row";
 
