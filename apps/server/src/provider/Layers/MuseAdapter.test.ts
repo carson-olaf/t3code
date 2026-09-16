@@ -262,6 +262,13 @@ const collectUntil = (
   adapter: { streamEvents: Stream.Stream<ProviderRuntimeEvent> },
   type: ProviderRuntimeEvent["type"],
 ) => Stream.runCollect(adapter.streamEvents.pipe(Stream.takeUntil((event) => event.type === type)));
+// The queue stream pulls with takeAll and takeUntil truncates mid-chunk, so a
+// collect must end at the burst's last event: ending mid-burst swallows the
+// rest of the pull. Predicates below name the terminal event of each burst.
+const collectMatching = (
+  adapter: { streamEvents: Stream.Stream<ProviderRuntimeEvent> },
+  matches: (event: ProviderRuntimeEvent) => boolean,
+) => Stream.runCollect(adapter.streamEvents.pipe(Stream.takeUntil(matches)));
 const requestIdFrom = (
   events: ReadonlyArray<ProviderRuntimeEvent>,
   type: "request.opened" | "user-input.requested",
@@ -2125,10 +2132,10 @@ describe("MuseAdapter", () => {
   );
 
   it.effect(
-    "host failure and unavailable event feeds close once with one failed turn and durable cursor",
+    "host failure and gap event feeds close once with one failed turn and durable cursor",
     () =>
       Effect.gen(function* () {
-        for (const failure of ["host", "gap", "unavailable"] as const) {
+        for (const failure of ["host", "gap"] as const) {
           const fake = makeFakeHost();
           const resumed = makeFakeHost();
           let hostCount = 0;
@@ -2138,18 +2145,7 @@ describe("MuseAdapter", () => {
           const session = yield* adapter.startSession(startInput);
           yield* adapter.sendTurn({ threadId, input: "Run" });
           if (failure === "host") fake.crash();
-          else if (failure === "gap") fake.emit("view/gap", { after: "opaque1", next: "opaque2" });
-          else {
-            fake.emit("session/viewHealthChanged", { health: "available" });
-            fake.emit("session/viewHealthChanged", {
-              health: "unavailable",
-              noneReason: "projectionUnavailable",
-            });
-            fake.emit("session/viewHealthChanged", {
-              health: "unavailable",
-              noneReason: "projectionUnavailable",
-            });
-          }
+          else fake.emit("view/gap", { after: "opaque1", next: "opaque2" });
           const events = yield* collectUntil(adapter, "session.exited");
           assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
           assert.equal(
@@ -2166,11 +2162,6 @@ describe("MuseAdapter", () => {
           );
           yield* adapter.stopAll();
           assert.equal(fake.closeCount, 1);
-          if (failure === "unavailable") {
-            const error = events.find((event) => event.type === "runtime.error");
-            assert.include(error?.payload.message, "progress feed is unavailable");
-            assert.include(error?.payload.message, "Resume the session");
-          }
           if (failure === "gap") {
             const error = events.find((event) => event.type === "runtime.error");
             assert.include(
@@ -2205,6 +2196,180 @@ describe("MuseAdapter", () => {
           }
         }
       }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("unavailable view feed auto-resumes and replays the active turn", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      const recovered = makeFakeHost();
+      let hostCount = 0;
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => (hostCount++ === 0 ? fake.host : recovered.host),
+      });
+      const session = yield* adapter.startSession(startInput);
+      const first = yield* adapter.sendTurn({ threadId, input: "Run" });
+      yield* collectUntil(adapter, "turn.started");
+      fake.emit("session/viewHealthChanged", {
+        health: "unavailable",
+        noneReason: "projectionUnavailable",
+      });
+      // One subscription through the whole recovery burst, ending at the
+      // replayed turn: the burst quiesces there, while the graceful exit
+      // mid-burst would truncate the pull. Fatal fallbacks end the collect
+      // early so a regression fails fast instead of hanging.
+      const recoveredEvents = yield* collectMatching(
+        adapter,
+        (event) =>
+          (event.type === "turn.started" && event.turnId !== first.turnId) ||
+          event.type === "runtime.error" ||
+          (event.type === "session.exited" && event.payload.exitKind === "error"),
+      );
+      const replayedStartEvent = recoveredEvents.find(
+        (event) => event.type === "turn.started" && event.turnId !== first.turnId,
+      );
+      assert.isDefined(replayedStartEvent);
+      assert.equal(
+        recoveredEvents.find((event) => event.type === "turn.completed")?.payload.state,
+        "interrupted",
+      );
+      assert.include(
+        recoveredEvents.find((event) => event.type === "turn.completed")?.payload.errorMessage ??
+          "",
+        "reconnecting",
+      );
+      assert.equal(
+        recoveredEvents.find((event) => event.type === "session.exited")?.payload.exitKind,
+        "graceful",
+      );
+      assert.equal(recoveredEvents.filter((event) => event.type === "runtime.error").length, 0);
+      assert.deepEqual(
+        recoveredEvents.find((event) => event.type === "session.started")?.payload.resume,
+        session.resumeCursor,
+      );
+      assert.equal(
+        recovered.calls.find((call) => call.method === "session/resume")?.params.sessionId,
+        (session.resumeCursor as { sessionId: string }).sessionId,
+      );
+      const replayedStart = recovered.calls.find((call) => call.method === "turn/start");
+      assert.isDefined(replayedStart);
+      const replayedTexts = ((replayedStart?.params.input ?? []) as Array<{ text?: unknown }>)
+        .map((part) => part.text)
+        .filter((text): text is string => typeof text === "string");
+      assert.isTrue(replayedTexts.some((text) => text.includes("Run")));
+      const replayedTurnId = replayedStartEvent.turnId;
+      assert.isDefined(replayedTurnId);
+      recovered.emit("turn/completed", { turnId: replayedTurnId, terminal: "completed" });
+      const done = yield* collectUntil(adapter, "turn.completed");
+      assert.equal(
+        done.find((event) => event.type === "turn.completed")?.payload.state,
+        "completed",
+      );
+      yield* adapter.stopAll();
+      assert.equal(fake.closeCount, 1);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("view feed auto-recovery gives up after two attempts and fails the turn", () =>
+    Effect.gen(function* () {
+      const hosts = [makeFakeHost(), makeFakeHost(), makeFakeHost()];
+      let hostCount = 0;
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => {
+          const next = hosts[hostCount];
+          assert.isDefined(next);
+          hostCount++;
+          return next.host;
+        },
+      });
+      yield* adapter.startSession(startInput);
+      const first = yield* adapter.sendTurn({ threadId, input: "Run" });
+      yield* collectUntil(adapter, "turn.started");
+      const knownTurns = new Set<string>([first.turnId]);
+      for (const attempt of [0, 1] as const) {
+        hosts[attempt]?.emit("session/viewHealthChanged", {
+          health: "unavailable",
+          noneReason: "projectionUnavailable",
+        });
+        // End each attempt at its replayed turn: the burst quiesces there.
+        const replayed = yield* collectMatching(
+          adapter,
+          (event) =>
+            (event.type === "turn.started" &&
+              event.turnId !== undefined &&
+              !knownTurns.has(event.turnId)) ||
+            event.type === "runtime.error" ||
+            (event.type === "session.exited" && event.payload.exitKind === "error"),
+        );
+        const replayedStart = replayed.find(
+          (event) =>
+            event.type === "turn.started" &&
+            event.turnId !== undefined &&
+            !knownTurns.has(event.turnId),
+        );
+        assert.isDefined(replayedStart);
+        assert.isDefined(replayedStart.turnId);
+        knownTurns.add(replayedStart.turnId);
+        assert.equal(
+          replayed.find((event) => event.type === "turn.completed")?.payload.state,
+          "interrupted",
+        );
+      }
+      assert.equal(
+        hosts.filter((host) => host.calls.some((call) => call.method === "turn/start")).length,
+        3,
+      );
+      hosts[2]?.emit("session/viewHealthChanged", {
+        health: "unavailable",
+        noneReason: "projectionUnavailable",
+      });
+      const fatal = yield* collectUntil(adapter, "session.exited");
+      assert.equal(fatal.find((event) => event.type === "turn.completed")?.payload.state, "failed");
+      const error = fatal.find((event) => event.type === "runtime.error");
+      assert.include(error?.payload.message, "progress feed is unavailable");
+      assert.include(error?.payload.message, "Resume the session");
+      assert.equal(
+        fatal.find((event) => event.type === "session.exited")?.payload.recoverable,
+        true,
+      );
+      yield* adapter.stopAll();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("unavailable view feed while idle resumes without replaying a turn", () =>
+    Effect.gen(function* () {
+      const fake = makeFakeHost();
+      const recovered = makeFakeHost();
+      let hostCount = 0;
+      const adapter = yield* makeMuseAdapter(settings, {
+        createHost: async () => (hostCount++ === 0 ? fake.host : recovered.host),
+      });
+      const session = yield* adapter.startSession(startInput);
+      yield* collectUntil(adapter, "session.state.changed");
+      fake.emit("session/viewHealthChanged", {
+        health: "unavailable",
+        noneReason: "projectionUnavailable",
+      });
+      // End at the resumed session's ready state: the burst quiesces there.
+      const resumed = yield* collectMatching(
+        adapter,
+        (event) =>
+          event.type === "session.state.changed" ||
+          event.type === "runtime.error" ||
+          (event.type === "session.exited" && event.payload.exitKind === "error"),
+      );
+      assert.equal(resumed.filter((event) => event.type === "turn.completed").length, 0);
+      assert.equal(resumed.filter((event) => event.type === "runtime.error").length, 0);
+      assert.deepEqual(
+        resumed.find((event) => event.type === "session.started")?.payload.resume,
+        session.resumeCursor,
+      );
+      assert.equal(
+        recovered.calls.find((call) => call.method === "session/resume")?.params.sessionId,
+        (session.resumeCursor as { sessionId: string }).sessionId,
+      );
+      assert.isFalse(recovered.calls.some((call) => call.method === "turn/start"));
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("forwards max effort unchanged when switching to Muse Spark 1.3", () =>

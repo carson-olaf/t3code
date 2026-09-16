@@ -17,7 +17,9 @@ import {
   type MuseSettings,
   type ProviderRuntimeEvent,
   type ProviderRuntimeEventBase,
+  type ProviderSendTurnInput,
   type ProviderSession,
+  type ProviderSessionStartInput,
   type RuntimeContentStreamKind,
   type ServerProviderModel,
   type ThreadId,
@@ -190,6 +192,13 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
   const interruptTimeoutMs = options?.interruptTimeoutMs ?? 120_000;
   const sessions = new Map<ThreadId, SessionContext>();
   const locks = new Map<ThreadId, { semaphore: Semaphore.Semaphore; users: number }>();
+  // Native view-feed outages are survivable: the session file keeps every
+  // event, so the adapter resumes and replays the interrupted turn. The
+  // budget survives context replacement and resets on each admitted user
+  // turn, bounding runaway resume loops when the projection keeps failing.
+  const viewRecoveries = new Map<ThreadId, number>();
+  const lastTurnInputs = new Map<ThreadId, ProviderSendTurnInput>();
+  const MAX_VIEW_RECOVERIES = 2;
   const mintId = createUuidV7Mint();
   let disposed = false;
 
@@ -270,6 +279,7 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
   ) => {
     const turn = context.active;
     if (!turn) return;
+    if (state === "completed") viewRecoveries.delete(context.session.threadId);
     tokenUsage ??= turn.observedUsage;
     settleRequests(context);
     emit(context, {
@@ -654,6 +664,61 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
     if (terminal) turn.completedItems.add(item.itemId);
   };
 
+  // A dead view feed kills the live projection, but the host keeps the
+  // session file intact and shuts its own session down right after. Resume
+  // on a fresh host and replay the interrupted turn instead of failing it.
+  // False means recovery is impossible or the budget is spent, and the
+  // caller keeps the previous fatal behavior.
+  const recoverViewFeed = async (context: SessionContext): Promise<boolean> => {
+    const threadId = context.session.threadId;
+    if (context.stopped || disposed) return false;
+    const attempts = viewRecoveries.get(threadId) ?? 0;
+    if (attempts >= MAX_VIEW_RECOVERIES) return false;
+    const resumeCursor = context.session.resumeCursor;
+    if (!resumeCursor) return false;
+    viewRecoveries.set(threadId, attempts + 1);
+    const replay = context.active ? lastTurnInputs.get(threadId) : undefined;
+    if (context.active)
+      finishTurn(
+        context,
+        "interrupted",
+        `Muse's progress feed dropped; reconnecting automatically (attempt ${attempts + 1} of ${MAX_VIEW_RECOVERIES}).`,
+      );
+    else
+      emit(context, {
+        type: "runtime.warning",
+        payload: { message: "Muse's progress feed dropped while idle; reconnecting." },
+      });
+    try {
+      await runPromise(
+        startSession(
+          {
+            threadId,
+            resumeCursor,
+            runtimeMode: context.session.runtimeMode,
+            ...(context.session.cwd ? { cwd: context.session.cwd } : {}),
+            ...(context.session.model
+              ? { modelSelection: { instanceId, model: context.session.model } }
+              : {}),
+          },
+          { isRecovery: true },
+        ),
+      );
+    } catch {
+      return false;
+    }
+    if (!replay) return true;
+    try {
+      await runPromise(sendTurnImpl(replay, { isRecovery: true }));
+    } catch (error) {
+      const fresh = sessions.get(threadId);
+      if (fresh && !fresh.stopped)
+        emit(fresh, { type: "runtime.error", payload: { message: describeError(error) } });
+      return false;
+    }
+    return true;
+  };
+
   const handleNotification = async (context: SessionContext, notification: Notification) => {
     if (context.stopped) return;
     const params = notification.params ?? {};
@@ -978,10 +1043,12 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
       case "session/viewHealthChanged":
         // Muse can keep executing after its projected event feed fails. Without
         // closing the broken connection, T3 never receives the final turn event.
-        if (params.health === "unavailable")
+        if (params.health === "unavailable") {
+          if (await recoverViewFeed(context)) break;
           throw new Error(
             "Muse's progress feed is unavailable. This connection was closed because progress and completion can no longer be tracked. Resume the session to reconnect; Muse retains the saved conversation, but missing updates will not be restored in this chat.",
           );
+        }
         break;
       case "view/gap":
         throw new Error(
@@ -1091,6 +1158,8 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
 
   const stopSession = (threadId: ThreadId) =>
     asRequest("stopSession", async () => {
+      viewRecoveries.delete(threadId);
+      lastTurnInputs.delete(threadId);
       const context = sessions.get(threadId);
       if (!context) return;
       // Closing the owned host drains/cancels its in-flight commands and all pending requests.
@@ -1199,7 +1268,10 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
     return runGoalTurn(context, threadId, ack);
   };
 
-  const startSession: ProviderAdapterShape<ProviderAdapterError>["startSession"] = (input) =>
+  const startSession = (
+    input: ProviderSessionStartInput,
+    opts?: { readonly isRecovery?: boolean },
+  ): ReturnType<ProviderAdapterShape<ProviderAdapterError>["startSession"]> =>
     asRequest("startSession", async (signal) => {
       if (disposed) throw invalid("startSession", "Muse adapter has been stopped.");
       const previous = sessions.get(input.threadId);
@@ -1364,6 +1436,7 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
           type: "session.state.changed",
           payload: { state: context.active ? "running" : "ready" },
         });
+        if (!opts?.isRecovery) viewRecoveries.delete(input.threadId);
         return context.session;
       } catch (error) {
         await closeContext(context, describeError(error), true);
@@ -1373,131 +1446,139 @@ export const makeMuseAdapter = Effect.fn("makeMuseAdapter")(function* (
       }
     });
 
+  const sendTurnImpl = (
+    input: ProviderSendTurnInput,
+    opts?: { readonly isRecovery?: boolean },
+  ): ReturnType<ProviderAdapterShape<ProviderAdapterError>["sendTurn"]> =>
+    withThreadLock(
+      input.threadId,
+      Effect.gen(function* () {
+        const parts: Array<
+          { type: "text"; text: string } | { type: "image"; base64Data: string; mediaType: string }
+        > = [];
+        if (input.input) parts.push({ type: "text", text: input.input });
+        for (const attachment of input.attachments ?? []) {
+          if (attachment.type !== "image") continue;
+          const path = resolveAttachmentPath({
+            attachmentsDir: serverConfig.attachmentsDir,
+            attachment,
+          });
+          if (!path) return yield* invalid("sendTurn", "Invalid image attachment path.");
+          const bytes = yield* fileSystem.readFile(path).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "readAttachment",
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+          parts.push({
+            type: "image",
+            base64Data: Buffer.from(bytes).toString("base64"),
+            mediaType: attachment.mimeType,
+          });
+        }
+        const modelCatalog = options?.modelCatalog ? yield* options.modelCatalog : [];
+        return yield* asRequest("sendTurn", async () => {
+          if (!parts.length)
+            throw invalid("sendTurn", "Muse needs text or an image to start a turn.");
+          if (input.interactionMode === "plan")
+            throw invalid("sendTurn", "Muse SDK does not expose a dedicated plan mode.");
+          const context = getContext(input.threadId);
+          await context.notificationTail;
+          const goalCommand = parseGoalCommand(input.input);
+          if (goalCommand) return runGoalCommand(context, input.threadId, goalCommand);
+          const modelSelection =
+            input.modelSelection?.instanceId === instanceId ? input.modelSelection : undefined;
+          const selectedEffort =
+            getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
+            context.reasoningEffort;
+          if (selectedEffort !== undefined && !SUPPORTED_EFFORTS.has(selectedEffort))
+            throw invalid(
+              "sendTurn",
+              `Muse SDK does not support '${selectedEffort}' reasoning effort.`,
+            );
+          const model = modelSelection?.model;
+          const capabilities = modelCatalog.find(
+            (candidate) => candidate.slug === (model || context.session.model),
+          )?.capabilities;
+          const effort = resolveMuseReasoningEffort(
+            capabilities,
+            selectedEffort ?? (capabilities === undefined ? "medium" : undefined),
+          );
+          if (model && model !== context.session.model) {
+            await command(context, "session/setModel", {
+              model: { modelId: model, providerId: "meta" },
+            });
+            context.session = { ...context.session, model };
+          }
+          const commandId = context.host.connection.mintCommandId();
+          context.reasoningEffort = effort;
+          const started = context.active === undefined;
+          const turnId = context.active?.id ?? TurnId.make(commandId);
+          try {
+            const result = decodeTurnStart(
+              await command(
+                context,
+                "turn/start",
+                {
+                  input: [
+                    {
+                      type: "text",
+                      text: buildRuntimeInstructions({
+                        harness: "Muse Code",
+                        model: context.session.model,
+                        reasoningEffort: effort,
+                      }),
+                    },
+                    ...parts,
+                  ],
+                  displayText: input.input?.trim() ? input.input : "Image attachment",
+                  ifBusy: "steer",
+                  ...(effort ? { reasoningEffort: effort } : {}),
+                },
+                commandId,
+              ),
+            );
+            await context.notificationTail;
+            if (context.stopped)
+              throw invalid("sendTurn", "Muse session stopped while admitting the turn.");
+            if (started && result.turnId !== turnId)
+              throw new Error("Muse returned an unexpected fresh-turn identity.");
+            // Rejected submissions have no native turn and must not create a
+            // checkpoint. Admission or turn/started owns the lifecycle. The
+            // known-turn set prevents reopening a turn completed before its ack.
+            if (!context.active || context.active.id === result.turnId)
+              beginTurn(context, TurnId.make(result.turnId), effort);
+            // A steering submit can become a fresh turn if its predecessor finishes
+            // before admission. Its ack can precede the predecessor's terminal
+            // notification; the ordered notifications own that transition.
+            if (!opts?.isRecovery) {
+              lastTurnInputs.set(input.threadId, input);
+              viewRecoveries.delete(input.threadId);
+            }
+            return {
+              threadId: input.threadId,
+              turnId: TurnId.make(result.turnId),
+              resumeCursor: context.session.resumeCursor,
+            };
+          } catch (error) {
+            if (started && context.active?.id === turnId)
+              finishTurn(context, "failed", describeError(error));
+            throw error;
+          }
+        });
+      }),
+    );
+
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider: PROVIDER,
     capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true },
     startSession: (input) => withThreadLock(input.threadId, startSession(input)),
-    sendTurn: (input) =>
-      withThreadLock(
-        input.threadId,
-        Effect.gen(function* () {
-          const parts: Array<
-            | { type: "text"; text: string }
-            | { type: "image"; base64Data: string; mediaType: string }
-          > = [];
-          if (input.input) parts.push({ type: "text", text: input.input });
-          for (const attachment of input.attachments ?? []) {
-            if (attachment.type !== "image") continue;
-            const path = resolveAttachmentPath({
-              attachmentsDir: serverConfig.attachmentsDir,
-              attachment,
-            });
-            if (!path) return yield* invalid("sendTurn", "Invalid image attachment path.");
-            const bytes = yield* fileSystem.readFile(path).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "readAttachment",
-                    detail: cause.message,
-                    cause,
-                  }),
-              ),
-            );
-            parts.push({
-              type: "image",
-              base64Data: Buffer.from(bytes).toString("base64"),
-              mediaType: attachment.mimeType,
-            });
-          }
-          const modelCatalog = options?.modelCatalog ? yield* options.modelCatalog : [];
-          return yield* asRequest("sendTurn", async () => {
-            if (!parts.length)
-              throw invalid("sendTurn", "Muse needs text or an image to start a turn.");
-            if (input.interactionMode === "plan")
-              throw invalid("sendTurn", "Muse SDK does not expose a dedicated plan mode.");
-            const context = getContext(input.threadId);
-            await context.notificationTail;
-            const goalCommand = parseGoalCommand(input.input);
-            if (goalCommand) return runGoalCommand(context, input.threadId, goalCommand);
-            const modelSelection =
-              input.modelSelection?.instanceId === instanceId ? input.modelSelection : undefined;
-            const selectedEffort =
-              getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
-              context.reasoningEffort;
-            if (selectedEffort !== undefined && !SUPPORTED_EFFORTS.has(selectedEffort))
-              throw invalid(
-                "sendTurn",
-                `Muse SDK does not support '${selectedEffort}' reasoning effort.`,
-              );
-            const model = modelSelection?.model;
-            const capabilities = modelCatalog.find(
-              (candidate) => candidate.slug === (model || context.session.model),
-            )?.capabilities;
-            const effort = resolveMuseReasoningEffort(
-              capabilities,
-              selectedEffort ?? (capabilities === undefined ? "medium" : undefined),
-            );
-            if (model && model !== context.session.model) {
-              await command(context, "session/setModel", {
-                model: { modelId: model, providerId: "meta" },
-              });
-              context.session = { ...context.session, model };
-            }
-            const commandId = context.host.connection.mintCommandId();
-            context.reasoningEffort = effort;
-            const started = context.active === undefined;
-            const turnId = context.active?.id ?? TurnId.make(commandId);
-            try {
-              const result = decodeTurnStart(
-                await command(
-                  context,
-                  "turn/start",
-                  {
-                    input: [
-                      {
-                        type: "text",
-                        text: buildRuntimeInstructions({
-                          harness: "Muse Code",
-                          model: context.session.model,
-                          reasoningEffort: effort,
-                        }),
-                      },
-                      ...parts,
-                    ],
-                    displayText: input.input?.trim() ? input.input : "Image attachment",
-                    ifBusy: "steer",
-                    ...(effort ? { reasoningEffort: effort } : {}),
-                  },
-                  commandId,
-                ),
-              );
-              await context.notificationTail;
-              if (context.stopped)
-                throw invalid("sendTurn", "Muse session stopped while admitting the turn.");
-              if (started && result.turnId !== turnId)
-                throw new Error("Muse returned an unexpected fresh-turn identity.");
-              // Rejected submissions have no native turn and must not create a
-              // checkpoint. Admission or turn/started owns the lifecycle. The
-              // known-turn set prevents reopening a turn completed before its ack.
-              if (!context.active || context.active.id === result.turnId)
-                beginTurn(context, TurnId.make(result.turnId), effort);
-              // A steering submit can become a fresh turn if its predecessor finishes
-              // before admission. Its ack can precede the predecessor's terminal
-              // notification; the ordered notifications own that transition.
-              return {
-                threadId: input.threadId,
-                turnId: TurnId.make(result.turnId),
-                resumeCursor: context.session.resumeCursor,
-              };
-            } catch (error) {
-              if (started && context.active?.id === turnId)
-                finishTurn(context, "failed", describeError(error));
-              throw error;
-            }
-          });
-        }),
-      ),
+    sendTurn: (input) => sendTurnImpl(input),
     interruptTurn: (threadId, turnId) =>
       // A stop issued during admission must inspect the admitted turn after sendTurn
       // releases its lock. Native notifications run independently of this lock.
