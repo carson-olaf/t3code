@@ -13,6 +13,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { makePrimeAgentTextGeneration } from "../../textGeneration/PrimeAgentTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makePrimeAgentAdapter } from "../Layers/PrimeAgentAdapter.ts";
+import { probePrimeAgentSkills } from "./PrimeAgentSkills.ts";
 import {
   buildInitialPrimeAgentProviderSnapshot,
   checkPrimeAgentProviderStatus,
@@ -169,6 +170,25 @@ export const PrimeAgentDriver: ProviderDriver<PrimeAgentSettings, PrimeAgentDriv
         accentColor,
         enabled,
         snapshot,
+        snapshotForCwd: (cwd) =>
+          !effectiveConfig.enabled
+            ? snapshot.getSnapshot
+            : Effect.all([
+                snapshot.getSnapshot,
+                probePrimeAgentSkills(cwd, processEnv).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderDriverError({
+                        driver: DRIVER_KIND,
+                        instanceId,
+                        detail: `Failed to discover Prime Agent skills for '${cwd}'`,
+                        cause,
+                      }),
+                  ),
+                ),
+              ]).pipe(Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills }))),
         adapter,
         textGeneration,
       } satisfies ProviderInstance;
