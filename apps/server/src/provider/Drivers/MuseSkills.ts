@@ -30,7 +30,7 @@ import { spawnAndCollect } from "../providerSnapshot.ts";
 const MUSE_SKILLS_PROBE_TIMEOUT_MS = 4_000;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 
-class MuseSkillsProbeError extends Schema.TaggedErrorClass<MuseSkillsProbeError>()(
+class MuseSkillsProbeError extends Schema.TaggedError<MuseSkillsProbeError>()(
   "MuseSkillsProbeError",
   {
     stage: Schema.Literals(["spawn", "timeout", "exit", "decode"]),

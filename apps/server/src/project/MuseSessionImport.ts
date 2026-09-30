@@ -110,7 +110,7 @@ export function museImportInstances(settings: ServerSettings, environment: NodeJ
   });
 }
 
-class MuseImportError extends Schema.TaggedErrorClass<MuseImportError>()("MuseImportError", {
+class MuseImportError extends Schema.TaggedError<MuseImportError>()("MuseImportError", {
   detail: Schema.String,
 }) {}
 

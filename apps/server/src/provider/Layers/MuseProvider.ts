@@ -86,7 +86,7 @@ const ModelCatalog = Schema.Struct({
 });
 const decodeModelCatalog = Schema.decodeUnknownEffect(ModelCatalog);
 
-class MuseCatalogError extends Schema.TaggedErrorClass<MuseCatalogError>()("MuseCatalogError", {
+class MuseCatalogError extends Schema.TaggedError<MuseCatalogError>()("MuseCatalogError", {
   detail: Schema.String,
 }) {}
 

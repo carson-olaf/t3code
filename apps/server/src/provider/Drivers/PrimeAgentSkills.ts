@@ -19,6 +19,7 @@
 import * as NodeOS from "node:os";
 
 import type { ServerProviderSkill } from "@t3tools/contracts";
+import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -29,9 +30,9 @@ import { parse as parseYamlDocument } from "yaml";
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const ROOT_MARKDOWN_PATTERN = /\.md$/i;
 const MAX_SKILL_DEPTH = 10;
-const MAX_SKILL_BYTES = FileSystem.Size(1_000_000);
+const MAX_SKILL_BYTES = ByteSize.bytes(1_000_000);
 const MAX_SKILL_SCAN_ENTRIES = 10_000;
-const MAX_SKILL_SCAN_BYTES = FileSystem.Size(8_000_000);
+const MAX_SKILL_SCAN_BYTES = ByteSize.bytes(8_000_000);
 
 interface PrimeAgentSkillFrontmatter {
   readonly description?: string;
@@ -47,7 +48,7 @@ interface PrimeAgentSkillScanBudget {
   incomplete: boolean;
 }
 
-class PrimeAgentSkillsProbeError extends Schema.TaggedErrorClass<PrimeAgentSkillsProbeError>()(
+class PrimeAgentSkillsProbeError extends Schema.TaggedError<PrimeAgentSkillsProbeError>()(
   "PrimeAgentSkillsProbeError",
   {
     reason: Schema.Literals(["scan-budget-exhausted", "filesystem-error"]),
