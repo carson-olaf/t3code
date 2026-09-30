@@ -26,6 +26,7 @@ const THREAD_SNAPSHOT: OrchestrationThreadDetailSnapshot = {
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
+    pullRequests: [],
     worktreePath: null,
     latestTurn: null,
     createdAt: "2026-09-11T00:00:00.000Z",
