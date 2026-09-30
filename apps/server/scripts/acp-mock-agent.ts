@@ -628,6 +628,18 @@ const program = Effect.gen(function* () {
         return yield* Effect.sync(() => process.exit(23));
       }
 
+      // Fork (Prime Agent): a reasoning chunk inside a live prompt.
+      const thoughtText = process.env.T3_ACP_EMIT_THOUGHT_TEXT;
+      if (thoughtText) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: thoughtText },
+          },
+        });
+      }
+
       if (completeFirstPromptOnCancel && promptCount === 1) {
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,

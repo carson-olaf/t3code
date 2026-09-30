@@ -394,39 +394,33 @@ primeAgentAdapterTestLayer("PrimeAgentAdapterLive", (it) => {
         const wrapperPath = yield* Effect.promise(() =>
           makeProbeWrapper({
             argvLogPath: NodePath.join(tempDir, "argv.txt"),
-            extraEnv: { T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" },
+            extraEnv: { T3_ACP_EMIT_THOUGHT_TEXT: "weighing the options" },
           }),
         );
         const adapter = yield* makePrimeAgentAdapter(
           decodePrimeAgentSettings({ enabled: true, binaryPath: wrapperPath }),
         );
         const threadId = ThreadId.make("prime-agent-thought");
-        const toolStarted = yield* Deferred.make<void>();
         const thought = yield* Deferred.make<ProviderRuntimeEvent>();
-        yield* Stream.runForEach(adapter.streamEvents, (event) => {
-          if (event.threadId !== threadId) return Effect.void;
-          if (event.type === "item.updated" && event.itemId === "native-cancel-tool")
-            return Deferred.succeed(toolStarted, undefined).pipe(Effect.ignore);
-          if (event.type === "content.delta")
-            return Deferred.succeed(thought, event).pipe(Effect.ignore);
-          return Effect.void;
-        }).pipe(Effect.forkChild);
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.threadId === threadId &&
+          event.type === "content.delta" &&
+          event.payload.streamKind === "reasoning_text"
+            ? Deferred.succeed(thought, event).pipe(Effect.ignore)
+            : Effect.void,
+        ).pipe(Effect.forkChild);
         yield* adapter.startSession({
           threadId,
           provider: ProviderDriverKind.make("primeAgent"),
           cwd: process.cwd(),
           runtimeMode: "full-access",
         });
-        const prompt = yield* adapter.sendTurn({ threadId, input: "wait" }).pipe(Effect.forkChild);
-        yield* Deferred.await(toolStarted);
-        yield* adapter.interruptTurn(threadId);
+        yield* adapter.sendTurn({ threadId, input: "think" });
         const event = yield* Deferred.await(thought);
         assert.equal(event.type, "content.delta");
         if (event.type === "content.delta") {
-          assert.equal(event.payload.streamKind, "reasoning_text");
-          assert.equal(event.payload.delta, "native-cancel-received");
+          assert.equal(event.payload.delta, "weighing the options");
         }
-        yield* Fiber.interrupt(prompt);
         yield* adapter.stopSession(threadId);
       }),
     ),

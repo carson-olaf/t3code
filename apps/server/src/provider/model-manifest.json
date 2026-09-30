@@ -66,6 +66,24 @@
       "t3CodeRange": ">=0.0.42",
       "recommendedRange": "=1.1.1",
       "ranges": [{ "range": "=1.1.1", "status": "supported" }]
+    },
+    {
+      "driver": "primeAgent",
+      "t3CodeRange": ">=0.0.44",
+      "recommendedRange": ">=0.9.4",
+      "ranges": [
+        { "range": ">=0.9.4", "status": "supported" },
+        { "range": "<0.9.4", "status": "unknown" }
+      ]
+    },
+    {
+      "driver": "muse",
+      "t3CodeRange": ">=0.0.44",
+      "recommendedRange": ">=1.4.1",
+      "ranges": [
+        { "range": ">=1.4.1", "status": "supported" },
+        { "range": "<1.4.1", "status": "unknown" }
+      ]
     }
   ],
   "currentModels": {
