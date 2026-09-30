@@ -49,13 +49,6 @@ export interface ProviderClientDefinition {
 
 const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
   {
-    value: ProviderDriverKind.make("primeAgent"),
-    label: "Prime Agent",
-    icon: PrimeAgentIcon,
-    badgeLabel: "Early Access",
-    settingsSchema: PrimeAgentSettings,
-  },
-  {
     value: ProviderDriverKind.make("codex"),
     label: "Codex",
     icon: OpenAI,
@@ -86,6 +79,13 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("primeAgent"),
+    label: "Prime Agent",
+    icon: PrimeAgentIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: PrimeAgentSettings,
   },
   {
     value: ProviderDriverKind.make("muse"),
