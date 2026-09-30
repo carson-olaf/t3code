@@ -72,6 +72,8 @@ report_status() {
 }
 
 use_node_24
+# Build scripts shell out to repo tools such as `vp`, which are not installed globally.
+export PATH="$repo_root/node_modules/.bin:$PATH"
 
 if $status_only; then
   report_status
