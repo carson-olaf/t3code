@@ -130,13 +130,24 @@ if $build; then
 
   if $install; then
     log "Installing $APP_PATH"
-    if pgrep -f "$APP_PATH/Contents/MacOS/" >/dev/null; then
+    # Fixed-string match: the "+" in the app name is a regex quantifier to pgrep.
+    if ps -Ao command | grep -F "$APP_PATH/Contents/MacOS/" | grep -vq grep; then
       echo "$APP_NAME is running. Quit it (running agent turns stop), then rerun with --no-merge." >&2
       exit 1
     fi
     staging="$(mktemp -d)"
     ditto -x -k "$built_zip" "$staging"
     built_app="$(ls -d "$staging"/*.app | head -1)"
+    # Local builds are ad-hoc signed, so macOS treats every build as a new app and
+    # asks again for keychain and folder access. A stable signing identity keeps
+    # those grants across updates. Override with FORK_SIGN_IDENTITY=- for ad-hoc.
+    sign_identity="${FORK_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
+      sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)}"
+    if [[ -n "$sign_identity" && "$sign_identity" != "-" ]]; then
+      codesign --force --deep --sign "$sign_identity" "$built_app"
+      codesign --verify --deep --strict "$built_app"
+      echo "Signed with $sign_identity"
+    fi
     if [[ -d "$APP_PATH" ]]; then
       # Keep the previous build in the Trash so a bad build is one drag away from rollback.
       mv "$APP_PATH" "$HOME/.Trash/${APP_NAME} $(date +%Y%m%d-%H%M%S).app"
