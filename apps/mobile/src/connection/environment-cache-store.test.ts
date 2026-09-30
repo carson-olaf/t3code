@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -102,35 +103,37 @@ function makeDatabase() {
 }
 
 describe("mobile SQLite environment cache store", () => {
-  it.effect("discards v3 thread snapshots so historical activities are refetched", () =>
-    Effect.gen(function* () {
-      const memory = makeDatabase();
-      const store = yield* make().pipe(Effect.provideService(MobileDatabase, memory.database));
-      const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
-      memory.values.set(
-        id,
-        JSON.stringify({
-          schemaVersion: 3,
-          environmentId: ENVIRONMENT_ID,
-          threadId: THREAD_ID,
-          snapshot: THREAD_SNAPSHOT,
-        }),
-      );
+  it.effect.each([3, 4])(
+    "discards v%i thread snapshots so historical activities are refetched",
+    (schemaVersion) =>
+      Effect.gen(function* () {
+        const memory = makeDatabase();
+        const store = yield* make().pipe(Effect.provideService(MobileDatabase, memory.database));
+        const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
+        memory.values.set(
+          id,
+          JSON.stringify({
+            schemaVersion,
+            environmentId: ENVIRONMENT_ID,
+            threadId: THREAD_ID,
+            snapshot: THREAD_SNAPSHOT,
+          }),
+        );
 
-      expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
-      expect(memory.removed).toEqual([id]);
-      expect(memory.values.has(id)).toBe(false);
-    }),
+        expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
+        expect(memory.removed).toEqual([id]);
+        expect(memory.values.has(id)).toBe(false);
+      }),
   );
 
-  it.effect("accepts v4 thread snapshots and round-trips refreshed history", () =>
+  it.effect("accepts v5 thread snapshots and round-trips refreshed history", () =>
     Effect.gen(function* () {
       const memory = makeDatabase();
       const store = yield* make().pipe(Effect.provideService(MobileDatabase, memory.database));
       memory.values.set(
         cacheId(ENVIRONMENT_ID, "thread", THREAD_ID),
         JSON.stringify({
-          schemaVersion: 4,
+          schemaVersion: 5,
           environmentId: ENVIRONMENT_ID,
           threadId: THREAD_ID,
           snapshot: THREAD_SNAPSHOT,
@@ -150,6 +153,80 @@ describe("mobile SQLite environment cache store", () => {
       expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.some(refreshed));
       expect(memory.removed).toEqual([]);
     }),
+  );
+
+  it.effect(
+    "invalidates pre-thinking thread caches while preserving current snapshots and other caches",
+    () =>
+      Effect.gen(function* () {
+        const memory = makeDatabase();
+        const store = yield* make().pipe(Effect.provideService(MobileDatabase, memory.database));
+        const now = "2026-09-04T00:00:00.000Z";
+        const snapshot: OrchestrationThreadDetailSnapshot = {
+          snapshotSequence: 2,
+          thread: {
+            id: ThreadId.make("thread-1"),
+            projectId: ProjectId.make("project-1"),
+            title: "Thread",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            pullRequests: [],
+            worktreePath: null,
+            latestTurn: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            deletedAt: null,
+            messages: [
+              {
+                id: MessageId.make("thinking-1"),
+                role: "reasoning",
+                text: "Checking the evidence.",
+                turnId: null,
+                streaming: false,
+                createdAt: now,
+                updatedAt: now,
+              },
+            ],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          },
+          page: { beforeCursor: null, hasMore: false, snapshotSequence: 2, threadSequence: 2 },
+        };
+        yield* store.saveThread(ENVIRONMENT_ID, snapshot);
+        yield* store.saveVcsRefs(ENVIRONMENT_ID, "/repo", REFS);
+        expect(yield* store.loadThread(ENVIRONMENT_ID, snapshot.thread.id)).toEqual(
+          Option.some(snapshot),
+        );
+        const id = cacheId(ENVIRONMENT_ID, "thread", snapshot.thread.id);
+        memory.values.set(
+          id,
+          JSON.stringify({
+            schemaVersion: 3,
+            environmentId: ENVIRONMENT_ID,
+            threadId: snapshot.thread.id,
+            snapshot: {
+              ...snapshot,
+              thread: {
+                ...snapshot.thread,
+                messages: snapshot.thread.messages.map((message) => ({
+                  ...message,
+                  role: "system",
+                })),
+              },
+            },
+          }),
+        );
+        expect(yield* store.loadThread(ENVIRONMENT_ID, snapshot.thread.id)).toEqual(Option.none());
+        expect(memory.removed).toEqual([id]);
+        expect(yield* store.loadVcsRefs(ENVIRONMENT_ID, "/repo")).toEqual(Option.some(REFS));
+      }),
   );
 
   it.effect("round-trips schema-validated VCS refs", () =>
